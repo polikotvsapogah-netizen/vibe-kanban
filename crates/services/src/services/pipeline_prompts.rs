@@ -1,13 +1,15 @@
 const PLANNER_PROMPT: &str = "You are a planning agent. Create a detailed implementation plan for \
 the given task. Break it into clear steps with file paths, functions, and expected changes. \
-Output the plan in structured markdown.";
+Output the plan in structured markdown. \
+Include your complete plan in the `revised_plan` field of your verdict JSON.";
 
 const REVIEWER_CONSENSUS_PROMPT: &str = "You are a plan review agent in consensus mode. You may \
 rewrite and improve the plan. Return your improved version along with what you changed and why. \
 If the plan is good as-is, approve it. Your verdict JSON must include: verdict, summary, \
 revised_plan (the full improved plan text if you changed it), what_changed (list of changes), \
 why_changed (reasoning for each change), unresolved_issues (remaining concerns), and issues \
-(list of {file, line, description} objects for specific code-level concerns).";
+(list of {file, line, description} objects for specific code-level concerns). \
+Include the final agreed plan in the `revised_plan` field of your verdict JSON.";
 
 const REVIEWER_STRICT_PROMPT: &str = "You are a plan review agent in strict mode. Critique the \
 plan but do not rewrite it. List blockers, missing steps, risks, and suggested fixes. If the \

@@ -305,14 +305,30 @@ impl PipelineController {
         };
 
         // Build a handoff artifact for the next stage.
+        // Use verdict.revised_plan if available, otherwise fall back to summary.
+        let final_plan = verdict
+            .revised_plan
+            .clone()
+            .or_else(|| Some(verdict.summary.clone()));
+
+        // Carry forward constraints and acceptance_criteria from previous handoffs.
+        let prev_constraints = handoff_artifacts
+            .values()
+            .flat_map(|h| h.constraints.iter().cloned())
+            .collect::<Vec<_>>();
+        let prev_criteria = handoff_artifacts
+            .values()
+            .flat_map(|h| h.acceptance_criteria.iter().cloned())
+            .collect::<Vec<_>>();
+
         let artifact = HandoffArtifact {
             from_stage: current_stage.id.clone(),
             to_stage: next_stage.id.clone(),
             review_summary: Some(verdict.summary.clone()),
-            final_plan: verdict.revised_plan.clone(),
-            constraints: vec![],
+            final_plan,
+            constraints: prev_constraints,
             risks: verdict.risks.clone(),
-            acceptance_criteria: vec![],
+            acceptance_criteria: prev_criteria,
             issues: verdict.issues.clone(),
             test_report: None,
         };
@@ -355,7 +371,7 @@ impl PipelineController {
         handoff_artifacts: &mut HashMap<String, HandoffArtifact>,
         role_sessions: &mut HashMap<String, String>,
         session_id: Uuid,
-        stage_history: &[StageHistoryEntry],
+        _stage_history: &[StageHistoryEntry],
     ) -> TransitionAction {
         // Bug 1 fix: check for "pause" BEFORE any retry counter logic.
         if current_stage.on_fail == "pause" {
@@ -388,14 +404,29 @@ impl PipelineController {
 
             // Build a handoff with the review issues so the retry stage knows
             // what to fix.
+            let final_plan = verdict
+                .revised_plan
+                .clone()
+                .or_else(|| Some(verdict.summary.clone()));
+
+            // Carry forward constraints and acceptance_criteria from previous handoffs.
+            let prev_constraints = handoff_artifacts
+                .values()
+                .flat_map(|h| h.constraints.iter().cloned())
+                .collect::<Vec<_>>();
+            let prev_criteria = handoff_artifacts
+                .values()
+                .flat_map(|h| h.acceptance_criteria.iter().cloned())
+                .collect::<Vec<_>>();
+
             let artifact = HandoffArtifact {
                 from_stage: current_stage.id.clone(),
                 to_stage: fail_stage.id.clone(),
                 review_summary: Some(verdict.summary.clone()),
-                final_plan: verdict.revised_plan.clone(),
-                constraints: vec![],
+                final_plan,
+                constraints: prev_constraints,
                 risks: verdict.risks.clone(),
-                acceptance_criteria: vec![],
+                acceptance_criteria: prev_criteria,
                 issues: verdict.issues.clone(),
                 test_report: None,
             };
@@ -437,14 +468,28 @@ impl PipelineController {
                         }
                     };
 
+                    let final_plan = verdict
+                        .revised_plan
+                        .clone()
+                        .or_else(|| Some(verdict.summary.clone()));
+
+                    let prev_constraints = handoff_artifacts
+                        .values()
+                        .flat_map(|h| h.constraints.iter().cloned())
+                        .collect::<Vec<_>>();
+                    let prev_criteria = handoff_artifacts
+                        .values()
+                        .flat_map(|h| h.acceptance_criteria.iter().cloned())
+                        .collect::<Vec<_>>();
+
                     let artifact = HandoffArtifact {
                         from_stage: current_stage.id.clone(),
                         to_stage: fail_stage.id.clone(),
                         review_summary: Some(verdict.summary.clone()),
-                        final_plan: verdict.revised_plan.clone(),
-                        constraints: vec![],
+                        final_plan,
+                        constraints: prev_constraints,
                         risks: verdict.risks.clone(),
-                        acceptance_criteria: vec![],
+                        acceptance_criteria: prev_criteria,
                         issues: verdict.issues.clone(),
                         test_report: None,
                     };

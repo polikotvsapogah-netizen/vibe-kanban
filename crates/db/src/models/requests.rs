@@ -45,7 +45,8 @@ pub struct CreateAndStartWorkspaceRequest {
 #[derive(Debug, Serialize, Deserialize, TS)]
 pub struct CreateAndStartWorkspaceResponse {
     pub workspace: Workspace,
-    pub execution_process: ExecutionProcess,
+    /// None when the first pipeline stage requires approval before starting.
+    pub execution_process: Option<ExecutionProcess>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]

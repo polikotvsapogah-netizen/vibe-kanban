@@ -205,6 +205,34 @@ impl PipelineState {
         Ok(())
     }
 
+    pub async fn restore_approval(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+        stage_id: &str,
+        payload: &str,
+    ) -> Result<(), PipelineStateError> {
+        let rows = sqlx::query!(
+            r#"UPDATE pipeline_states SET
+                awaiting_approval = 1,
+                approval_stage_id = $1,
+                approval_payload = $2,
+                status = 'paused',
+                updated_at = datetime('now', 'subsec')
+               WHERE workspace_id = $3"#,
+            stage_id,
+            payload,
+            workspace_id,
+        )
+        .execute(pool)
+        .await?
+        .rows_affected();
+
+        if rows == 0 {
+            return Err(PipelineStateError::NotFound);
+        }
+        Ok(())
+    }
+
     pub async fn set_status(
         pool: &SqlitePool,
         workspace_id: Uuid,

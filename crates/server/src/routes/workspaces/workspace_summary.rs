@@ -198,28 +198,23 @@ pub async fn get_workspace_summaries(
                 };
 
                 // Build "current/max" attempt string for the current stage.
+                // Always show attempt when pipeline is active: first attempt = "1/3".
                 let attempt_str = if let Some(ref cfg) = config {
+                    let current_stage_config = cfg
+                        .stages
+                        .iter()
+                        .find(|s| s.id == ps.current_stage_id);
+                    let max_retries = current_stage_config
+                        .and_then(|s| s.max_retries)
+                        .unwrap_or(cfg.default_max_retries);
                     let retry_counts: Option<HashMap<String, u32>> =
                         serde_json::from_str(&ps.retry_counts).ok();
-                    if let Some(counts) = retry_counts {
-                        let current_retry = counts.get(&ps.current_stage_id).copied().unwrap_or(0);
-                        if current_retry > 0 {
-                            // Find max_retries for this stage.
-                            // Format: "current/max" where current is 1-based attempt number
-                            // and max is max_retries (the maximum number of retry attempts).
-                            let max_retries = cfg
-                                .stages
-                                .iter()
-                                .find(|s| s.id == ps.current_stage_id)
-                                .and_then(|s| s.max_retries)
-                                .unwrap_or(cfg.default_max_retries);
-                            Some(format!("{}/{}", current_retry, max_retries))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
+                    let current_retry = retry_counts
+                        .and_then(|counts| counts.get(&ps.current_stage_id).copied())
+                        .unwrap_or(0);
+                    // 1-based: first attempt is 1, after first retry is 2, etc.
+                    let current = current_retry + 1;
+                    Some(format!("{}/{}", current, max_retries))
                 } else {
                     None
                 };

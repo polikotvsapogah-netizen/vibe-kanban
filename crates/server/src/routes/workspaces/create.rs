@@ -10,7 +10,8 @@ use db::models::{
 };
 use deployment::Deployment;
 use services::services::{
-    container::ContainerService, pipeline_prompts, pipeline_types::PipelineConfig,
+    container::ContainerService, pipeline_executor, pipeline_prompts,
+    pipeline_types::PipelineConfig,
 };
 use utils::response::ApiResponse;
 use uuid::Uuid;
@@ -348,6 +349,111 @@ pub async fn create_and_start_workspace(
         );
     }
 
+    // If pipeline is configured, use the first stage's agent and handle approval.
+    if let Some(ref config_json) = pipeline_config {
+        let config: PipelineConfig = serde_json::from_str(config_json).map_err(|e| {
+            ApiError::BadRequest(format!("Invalid pipeline_config JSON: {e}"))
+        })?;
+        let first_stage = &config.stages[0];
+
+        // If first stage requires approval, set awaiting_approval and don't start execution.
+        if first_stage.approval == "approval" {
+            let _pipeline_state =
+                PipelineState::find_by_workspace_id(&deployment.db().pool, workspace.id)
+                    .await?
+                    .ok_or_else(|| {
+                        ApiError::BadRequest("Pipeline state not found".to_string())
+                    })?;
+
+            let payload = serde_json::json!({ "stage_id": first_stage.id }).to_string();
+            PipelineState::set_approval(
+                &deployment.db().pool,
+                workspace.id,
+                &first_stage.id,
+                &payload,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to set first stage approval: {}", e);
+                ApiError::BadRequest(format!("Failed to set first stage approval: {e}"))
+            })?;
+
+            // Create the container but don't start execution.
+            deployment.container().create(&workspace).await?;
+
+            deployment
+                .track_if_analytics_allowed(
+                    "workspace_created_and_started",
+                    serde_json::json!({
+                        "executor": &first_stage.agent,
+                        "workspace_id": workspace.id.to_string(),
+                    }),
+                )
+                .await;
+
+            // Return a response with no execution process — workspace is awaiting approval.
+            return Ok(ResponseJson(ApiResponse::success(
+                CreateAndStartWorkspaceResponse {
+                    workspace,
+                    execution_process: None,
+                },
+            )));
+        }
+
+        // First stage is auto-approved — start via pipeline executor with the stage's agent.
+        let pipeline_state =
+            PipelineState::find_by_workspace_id(&deployment.db().pool, workspace.id)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::BadRequest("Pipeline state not found".to_string())
+                })?;
+
+        // Create container first.
+        deployment.container().create(&workspace).await?;
+
+        let started = pipeline_executor::start_pipeline_stage(
+            deployment.container(),
+            &deployment.db().pool,
+            &workspace,
+            &pipeline_state,
+            &first_stage.id,
+            &first_stage.role,
+            &first_stage.agent,
+            None,
+            &[],
+            false,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to start first pipeline stage: {}", e);
+            ApiError::BadRequest(format!("Failed to start first pipeline stage: {e}"))
+        })?;
+
+        deployment
+            .track_if_analytics_allowed(
+                "workspace_created_and_started",
+                serde_json::json!({
+                    "executor": &first_stage.agent,
+                    "workspace_id": workspace.id.to_string(),
+                }),
+            )
+            .await;
+
+        // Fetch the execution process to return.
+        let execution_process = db::models::execution_process::ExecutionProcess::find_by_id(
+            &deployment.db().pool,
+            started.execution_process_id,
+        )
+        .await?;
+
+        return Ok(ResponseJson(ApiResponse::success(
+            CreateAndStartWorkspaceResponse {
+                workspace,
+                execution_process,
+            },
+        )));
+    }
+
     let execution_process = deployment
         .container()
         .start_workspace(&workspace, executor_config.clone(), workspace_prompt)
@@ -367,7 +473,7 @@ pub async fn create_and_start_workspace(
     Ok(ResponseJson(ApiResponse::success(
         CreateAndStartWorkspaceResponse {
             workspace,
-            execution_process,
+            execution_process: Some(execution_process),
         },
     )))
 }

@@ -7,11 +7,13 @@ use db::models::{
     pipeline_state::PipelineState,
     session::{CreateSession, Session},
     workspace::Workspace,
+    workspace_repo::WorkspaceRepo,
 };
 use executors::{
     actions::{
         ExecutorAction, ExecutorActionType, coding_agent_follow_up::CodingAgentFollowUpRequest,
-        coding_agent_initial::CodingAgentInitialRequest, review::ReviewRequest,
+        coding_agent_initial::CodingAgentInitialRequest,
+        review::{RepoReviewContext, ReviewRequest},
     },
     executors::BaseCodingAgent,
     profile::ExecutorConfig,
@@ -102,8 +104,11 @@ pub async fn start_pipeline_stage(
         .ok_or_else(|| PipelineExecutorError::StageNotFound(stage_id.to_string()))?;
 
     // If this is a follow-up for a builder role (e.g., returning from code review),
-    // override workflow_profile to "receiving-code-review" for the fix-loop prompt.
+    // override workflow_profile to "receiving-code-review" for the fix-loop prompt,
+    // and add the "require_root_cause" policy.
+    let mut effective_policies = stage_config.policies.clone();
     let effective_profile = if is_follow_up && role == "builder" {
+        effective_policies.push("require_root_cause".to_string());
         Some("receiving-code-review")
     } else {
         stage_config.workflow_profile.as_deref()
@@ -113,7 +118,7 @@ pub async fn start_pipeline_stage(
         role,
         effective_profile,
         stage_config.workflow_mode.as_deref(),
-        &stage_config.policies,
+        &effective_policies,
     );
 
     let prompt = if prompt_additions.is_empty() {
@@ -137,9 +142,27 @@ pub async fn start_pipeline_stage(
             None
         };
 
+        // Build review context from workspace repos.
+        let review_context = match WorkspaceRepo::find_repos_for_workspace(pool, workspace.id)
+            .await
+        {
+            Ok(repos) if !repos.is_empty() => {
+                let context = repos
+                    .iter()
+                    .map(|repo| RepoReviewContext {
+                        repo_id: repo.id,
+                        repo_name: repo.name.clone(),
+                        base_commit: String::new(), // TODO: get from pipeline_state stage_history first entry
+                    })
+                    .collect::<Vec<_>>();
+                Some(context)
+            }
+            _ => None,
+        };
+
         ExecutorActionType::ReviewRequest(ReviewRequest {
             executor_config,
-            context: None,
+            context: review_context,
             prompt,
             session_id: review_agent_session,
             working_dir: None,

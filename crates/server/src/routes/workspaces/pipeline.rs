@@ -136,6 +136,16 @@ pub async fn approve_pipeline(
             ApiError::BadRequest(format!("Stage '{}' not found in pipeline config", stage_id))
         })?;
 
+    // Save approval info before clearing, so we can restore on failure.
+    let saved_approval_stage_id = state
+        .approval_stage_id
+        .clone()
+        .unwrap_or_else(|| stage_id.clone());
+    let saved_approval_payload = state
+        .approval_payload
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({ "stage_id": stage_id }).to_string());
+
     // Clear the approval flag first.
     PipelineState::clear_approval(pool, workspace.id)
         .await
@@ -229,8 +239,14 @@ pub async fn approve_pipeline(
         Ok(started) => started,
         Err(e) => {
             tracing::error!("Failed to start approved pipeline stage: {}", e);
-            // Rollback: set pipeline back to paused since clear_approval set it to running
-            let _ = PipelineState::set_status(pool, workspace.id, "paused").await;
+            // Rollback: restore approval state so user can retry.
+            let _ = PipelineState::restore_approval(
+                pool,
+                workspace.id,
+                &saved_approval_stage_id,
+                &saved_approval_payload,
+            )
+            .await;
             return Err(ApiError::BadRequest(format!(
                 "Failed to start pipeline stage: {}",
                 e
@@ -340,6 +356,16 @@ pub async fn reject_pipeline(
             ))
         })?;
 
+    // Save approval info before clearing, so we can restore on failure.
+    let saved_approval_stage_id = state
+        .approval_stage_id
+        .clone()
+        .unwrap_or_else(|| approval_stage_id.clone());
+    let saved_approval_payload = state
+        .approval_payload
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({ "stage_id": approval_stage_id }).to_string());
+
     // Clear approval.
     PipelineState::clear_approval(pool, workspace.id)
         .await
@@ -375,7 +401,7 @@ pub async fn reject_pipeline(
     let is_follow_up = session_id.is_some();
 
     // Start the on_fail stage.
-    let started = pipeline_executor::start_pipeline_stage(
+    let started = match pipeline_executor::start_pipeline_stage(
         deployment.container(),
         pool,
         &workspace,
@@ -388,10 +414,24 @@ pub async fn reject_pipeline(
         is_follow_up,
     )
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to start rejected pipeline stage: {}", e);
-        ApiError::BadRequest(format!("Failed to start pipeline stage: {}", e))
-    })?;
+    {
+        Ok(started) => started,
+        Err(e) => {
+            tracing::error!("Failed to start rejected pipeline stage: {}", e);
+            // Rollback: restore approval state so user can retry.
+            let _ = PipelineState::restore_approval(
+                pool,
+                workspace.id,
+                &saved_approval_stage_id,
+                &saved_approval_payload,
+            )
+            .await;
+            return Err(ApiError::BadRequest(format!(
+                "Failed to start pipeline stage: {}",
+                e
+            )));
+        }
+    };
 
     // Update role_sessions.
     let mut role_sessions_updated = role_sessions;
