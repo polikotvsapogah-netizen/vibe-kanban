@@ -25,6 +25,11 @@
   "awaitingApproval": "Awaiting approval",
   "stageProgress": "{{stage}} ({{current}}/{{total}})",
   "attempt": "Attempt {{current}}/{{max}}",
+  "submittingApproval": "Submitting approval",
+  "submitting": "Submitting...",
+  "submittingRejection": "Submitting rejection",
+  "feedbackPlaceholder": "Optional feedback...",
+  "cancel": "Cancel",
   "tooltips": {
     "pipeline": "Enable multi-stage pipeline. Task goes through multiple AI agents: planning, review, coding, testing",
     "planner": "Creates a detailed implementation plan from the task description",

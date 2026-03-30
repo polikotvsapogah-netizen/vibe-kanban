@@ -16,6 +16,15 @@ use uuid::Uuid;
 
 use crate::{DeploymentImpl, error::ApiError};
 
+// ── Error type for pipeline-specific errors ───────────────────────
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(tag = "type", rename_all = "snake_case")]
+pub enum PipelineApiError {
+    InvalidState { message: String },
+}
+
 // ── Response type ──────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, TS)]
@@ -421,7 +430,7 @@ pub async fn reject_pipeline(
 pub async fn pause_pipeline(
     Extension(workspace): Extension<Workspace>,
     State(deployment): State<DeploymentImpl>,
-) -> Result<ResponseJson<ApiResponse<PipelineStatusResponse>>, ApiError> {
+) -> Result<ResponseJson<ApiResponse<PipelineStatusResponse, PipelineApiError>>, ApiError> {
     let pool = &deployment.db().pool;
 
     let state = PipelineState::find_by_workspace_id(pool, workspace.id)
@@ -429,6 +438,18 @@ pub async fn pause_pipeline(
         .ok_or_else(|| {
             ApiError::BadRequest("No pipeline configured for this workspace".to_string())
         })?;
+
+    if state.status == "completed"
+        || state.status == "failed"
+        || state.status == "ready_for_pr"
+        || state.status == "paused"
+    {
+        return Ok(ResponseJson(ApiResponse::error_with_data(
+            PipelineApiError::InvalidState {
+                message: "Cannot pause pipeline in current state".to_string(),
+            },
+        )));
+    }
 
     let config: PipelineConfig = serde_json::from_str(&state.pipeline_config).map_err(|e| {
         tracing::error!("Failed to parse pipeline config: {}", e);

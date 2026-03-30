@@ -40,6 +40,7 @@ import zhHantSettings from './locales/zh-Hant/settings.json';
 import zhHantProjects from './locales/zh-Hant/projects.json';
 import zhHantTasks from './locales/zh-Hant/tasks.json';
 import zhHantOrganization from './locales/zh-Hant/organization.json';
+import ruPipeline from './locales/ru/pipeline.json';
 
 const resources = {
   en: {
@@ -91,6 +92,9 @@ const resources = {
     projects: zhHantProjects,
     tasks: zhHantTasks,
     organization: zhHantOrganization,
+  },
+  ru: {
+    pipeline: ruPipeline,
   },
 };
 

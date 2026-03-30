@@ -109,7 +109,7 @@ export function PipelineApprovalBar({
                     className="h-8 w-8 rounded-full p-0 text-green-600 hover:text-green-700 hover:bg-green-50"
                     disabled={disabled}
                     aria-label={
-                      isApproving ? 'Submitting approval' : t('approve')
+                      isApproving ? t('submittingApproval') : t('approve')
                     }
                     aria-busy={isApproving}
                   >
@@ -117,7 +117,7 @@ export function PipelineApprovalBar({
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>
-                  <p>{isApproving ? 'Submitting...' : t('approve')}</p>
+                  <p>{isApproving ? t('submitting') : t('approve')}</p>
                 </TooltipContent>
               </Tooltip>
 
@@ -129,7 +129,7 @@ export function PipelineApprovalBar({
                     className="h-8 w-8 rounded-full p-0"
                     disabled={disabled}
                     aria-label={
-                      isRejecting ? 'Submitting rejection' : t('reject')
+                      isRejecting ? t('submittingRejection') : t('reject')
                     }
                     aria-busy={isRejecting}
                   >
@@ -137,7 +137,7 @@ export function PipelineApprovalBar({
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>
-                  <p>{isRejecting ? 'Submitting...' : t('reject')}</p>
+                  <p>{isRejecting ? t('submitting') : t('reject')}</p>
                 </TooltipContent>
               </Tooltip>
             </div>
@@ -159,7 +159,7 @@ export function PipelineApprovalBar({
             <textarea
               value={feedback}
               onChange={(e) => setFeedback(e.target.value)}
-              placeholder="Optional feedback for the rejection..."
+              placeholder={t('feedbackPlaceholder')}
               disabled={isRejecting}
               className="min-h-[80px] w-full rounded-sm border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
             />
@@ -170,7 +170,7 @@ export function PipelineApprovalBar({
                 onClick={handleCancelReject}
                 disabled={isRejecting}
               >
-                Cancel
+                {t('cancel')}
               </Button>
               <Button
                 size="sm"

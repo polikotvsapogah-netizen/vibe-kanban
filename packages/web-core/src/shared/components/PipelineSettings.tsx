@@ -17,24 +17,32 @@ import {
 } from '@vibe/ui/components/RadixTooltip';
 import { InfoIcon } from 'lucide-react';
 
-// ---------- Types ----------
+// ---------- Backend-compatible Types ----------
 
 type AgentId = 'claude_code' | 'codex' | 'gemini';
 type ApprovalMode = 'auto' | 'approval';
-type ReviewerMode = 'consensus' | 'strict';
 
 interface StageConfig {
-  agent: AgentId;
-  approval: ApprovalMode;
-  reviewer_mode?: ReviewerMode;
-  second_agent?: AgentId | null;
-  second_agent_after_attempts?: number;
+  id: string;
+  role: string;
+  agent: string;
+  approval: string;
+  on_success: string;
+  on_fail: string;
+  max_retries: number | null;
+  escalate_agent?: string | null;
+  escalate_after_retries?: number | null;
+  workflow_profile?: string | null;
+  workflow_mode?: string | null;
+  policies: string[];
 }
 
 export interface PipelineConfig {
-  template: string;
-  stages: Record<string, StageConfig>;
-  create_pr: boolean;
+  name: string;
+  enable_second_agent: boolean;
+  default_max_retries: number;
+  auto_create_pr: boolean;
+  stages: StageConfig[];
 }
 
 interface PipelineSettingsProps {
@@ -44,13 +52,23 @@ interface PipelineSettingsProps {
 
 // ---------- Constants ----------
 
+/** UI stage keys in display order, matching stage ids */
 const STAGE_KEYS = [
   'planner',
   'reviewer',
   'builder',
-  'codeReview',
+  'code_reviewer',
   'tester',
 ] as const;
+
+/** Map from stage id to the translation key used in the UI */
+const STAGE_I18N_KEY: Record<string, string> = {
+  planner: 'planner',
+  reviewer: 'reviewer',
+  builder: 'builder',
+  code_reviewer: 'codeReview',
+  tester: 'tester',
+};
 
 const AGENTS: { value: AgentId; label: string }[] = [
   { value: 'claude_code', label: 'Claude Code' },
@@ -60,24 +78,106 @@ const AGENTS: { value: AgentId; label: string }[] = [
 
 function getDefaultConfig(): PipelineConfig {
   return {
-    template: 'full_pipeline',
-    stages: {
-      planner: { agent: 'claude_code', approval: 'auto' },
-      reviewer: {
-        agent: 'claude_code',
-        approval: 'approval',
-        reviewer_mode: 'consensus',
-      },
-      builder: { agent: 'claude_code', approval: 'auto' },
-      codeReview: {
+    name: 'Full Pipeline',
+    enable_second_agent: false,
+    default_max_retries: 7,
+    auto_create_pr: true,
+    stages: [
+      {
+        id: 'planner',
+        role: 'planner',
         agent: 'claude_code',
         approval: 'auto',
-        reviewer_mode: 'strict',
+        on_success: 'reviewer',
+        on_fail: 'pause',
+        max_retries: null,
+        workflow_profile: 'brainstorming',
+        workflow_mode: 'consensus',
+        policies: ['structured_verdict', 'structured_handoff'],
       },
-      tester: { agent: 'claude_code', approval: 'auto' },
-    },
-    create_pr: true,
+      {
+        id: 'reviewer',
+        role: 'reviewer',
+        agent: 'claude_code',
+        approval: 'approval',
+        on_success: 'builder',
+        on_fail: 'planner',
+        max_retries: 7,
+        workflow_profile: 'brainstorming',
+        workflow_mode: 'consensus',
+        policies: ['structured_verdict', 'structured_handoff'],
+      },
+      {
+        id: 'builder',
+        role: 'builder',
+        agent: 'claude_code',
+        approval: 'auto',
+        on_success: 'code_reviewer',
+        on_fail: 'pause',
+        max_retries: null,
+        workflow_profile: 'executing-plans',
+        workflow_mode: 'batched',
+        policies: ['structured_verdict', 'structured_handoff'],
+      },
+      {
+        id: 'code_reviewer',
+        role: 'code_reviewer',
+        agent: 'claude_code',
+        approval: 'auto',
+        on_success: 'tester',
+        on_fail: 'builder',
+        max_retries: 3,
+        workflow_profile: 'requesting-code-review',
+        workflow_mode: 'strict',
+        policies: ['structured_verdict', 'structured_handoff'],
+      },
+      {
+        id: 'tester',
+        role: 'tester',
+        agent: 'claude_code',
+        approval: 'auto',
+        on_success: 'complete',
+        on_fail: 'code_reviewer',
+        max_retries: 3,
+        escalate_agent: 'codex',
+        escalate_after_retries: 3,
+        workflow_profile: 'verification-before-completion',
+        workflow_mode: 'strict',
+        policies: [
+          'structured_verdict',
+          'structured_handoff',
+          'require_tests',
+          'no_done_without_verification',
+        ],
+      },
+    ],
   };
+}
+
+// ---------- Helpers ----------
+
+function findStage(
+  config: PipelineConfig,
+  stageId: string
+): StageConfig | undefined {
+  return config.stages.find((s) => s.id === stageId);
+}
+
+function updateStageInConfig(
+  config: PipelineConfig,
+  stageId: string,
+  patch: Partial<StageConfig>
+): PipelineConfig {
+  return {
+    ...config,
+    stages: config.stages.map((s) =>
+      s.id === stageId ? { ...s, ...patch } : s
+    ),
+  };
+}
+
+function isReviewerStage(stageId: string): boolean {
+  return stageId === 'reviewer' || stageId === 'code_reviewer';
 }
 
 // ---------- Helper: Info tooltip ----------
@@ -109,36 +209,20 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
     [onChange]
   );
 
-  const updateStage = useCallback(
-    (stageKey: string, patch: Partial<StageConfig>) => {
+  const handleStageUpdate = useCallback(
+    (stageId: string, patch: Partial<StageConfig>) => {
       if (!value) return;
-      onChange({
-        ...value,
-        stages: {
-          ...value.stages,
-          [stageKey]: { ...value.stages[stageKey]!, ...patch },
-        },
-      });
+      onChange(updateStageInConfig(value, stageId, patch));
     },
     [value, onChange]
   );
 
   const toggleSecondAgent = useCallback(
-    (stageKey: string, checked: boolean) => {
+    (checked: boolean) => {
       if (!value) return;
-      if (checked) {
-        updateStage(stageKey, {
-          second_agent: 'gemini',
-          second_agent_after_attempts: 3,
-        });
-      } else {
-        updateStage(stageKey, {
-          second_agent: null,
-          second_agent_after_attempts: undefined,
-        });
-      }
+      onChange({ ...value, enable_second_agent: checked });
     },
-    [value, updateStage]
+    [value, onChange]
   );
 
   return (
@@ -168,14 +252,14 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
                 {t('template')}
               </label>
               <Select
-                value={config.template}
-                onValueChange={(v) => onChange({ ...config, template: v })}
+                value={config.name}
+                onValueChange={(v) => onChange({ ...config, name: v })}
               >
                 <SelectTrigger className="h-8 text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="full_pipeline">
+                  <SelectItem value="Full Pipeline">
                     {t('fullPipeline')}
                   </SelectItem>
                 </SelectContent>
@@ -202,25 +286,24 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
                   </tr>
                 </thead>
                 <tbody>
-                  {STAGE_KEYS.map((stageKey) => {
-                    const stage = config.stages[stageKey];
+                  {STAGE_KEYS.map((stageId) => {
+                    const stage = findStage(config, stageId);
                     if (!stage) return null;
-                    const isReviewerStage =
-                      stageKey === 'reviewer' || stageKey === 'codeReview';
-                    const hasSecondAgent = !!stage.second_agent;
+                    const isReviewer = isReviewerStage(stageId);
+                    const i18nKey = STAGE_I18N_KEY[stageId] ?? stageId;
 
                     return (
                       <tr
-                        key={stageKey}
+                        key={stageId}
                         className="border-b border-border/20 last:border-b-0"
                       >
                         {/* Stage name */}
                         <td className="py-1.5 pr-2">
                           <div className="flex items-center">
                             <span className="text-normal font-medium">
-                              {t(`stages.${stageKey}`)}
+                              {t(`stages.${i18nKey}`)}
                             </span>
-                            <InfoTooltip text={t(`tooltips.${stageKey}`)} />
+                            <InfoTooltip text={t(`tooltips.${i18nKey}`)} />
                           </div>
                         </td>
 
@@ -229,7 +312,7 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
                           <Select
                             value={stage.agent}
                             onValueChange={(v) =>
-                              updateStage(stageKey, {
+                              handleStageUpdate(stageId, {
                                 agent: v as AgentId,
                               })
                             }
@@ -253,7 +336,7 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
                             <Select
                               value={stage.approval}
                               onValueChange={(v) =>
-                                updateStage(stageKey, {
+                                handleStageUpdate(stageId, {
                                   approval: v as ApprovalMode,
                                 })
                               }
@@ -270,16 +353,16 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
                                 </SelectItem>
                               </SelectContent>
                             </Select>
-                            {isReviewerStage && stage.reviewer_mode && (
+                            {isReviewer && stage.workflow_mode && (
                               <div className="flex items-center gap-1">
                                 <span className="text-low text-[10px]">
                                   {t('reviewMode')}:
                                 </span>
                                 <Select
-                                  value={stage.reviewer_mode}
+                                  value={stage.workflow_mode}
                                   onValueChange={(v) =>
-                                    updateStage(stageKey, {
-                                      reviewer_mode: v as ReviewerMode,
+                                    handleStageUpdate(stageId, {
+                                      workflow_mode: v,
                                     })
                                   }
                                 >
@@ -306,57 +389,61 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
                           </div>
                         </td>
 
-                        {/* Second agent */}
+                        {/* Second agent (global toggle) */}
                         <td className="py-1.5 pl-2">
                           <div className="flex flex-col gap-1">
                             <div className="flex items-center gap-1">
                               <Checkbox
-                                checked={hasSecondAgent}
+                                checked={config.enable_second_agent}
                                 onCheckedChange={(checked) =>
-                                  toggleSecondAgent(stageKey, checked)
+                                  toggleSecondAgent(!!checked)
                                 }
                               />
                               <InfoTooltip text={t('tooltips.secondAgent')} />
                             </div>
-                            {hasSecondAgent && (
-                              <div className="flex items-center gap-1">
-                                <Select
-                                  value={stage.second_agent ?? 'gemini'}
-                                  onValueChange={(v) =>
-                                    updateStage(stageKey, {
-                                      second_agent: v as AgentId,
-                                    })
-                                  }
-                                >
-                                  <SelectTrigger className="h-6 text-[10px] min-w-[90px]">
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    {AGENTS.map((a) => (
-                                      <SelectItem key={a.value} value={a.value}>
-                                        {a.label}
-                                      </SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
-                                <span className="text-low text-[10px] whitespace-nowrap">
-                                  {t('afterAttempts')}
-                                </span>
-                                <Input
-                                  type="number"
-                                  min={1}
-                                  max={10}
-                                  value={stage.second_agent_after_attempts ?? 3}
-                                  onChange={(e) =>
-                                    updateStage(stageKey, {
-                                      second_agent_after_attempts:
-                                        parseInt(e.target.value) || 3,
-                                    })
-                                  }
-                                  className="h-6 w-12 text-[10px] px-1"
-                                />
-                              </div>
-                            )}
+                            {config.enable_second_agent &&
+                              stage.escalate_agent && (
+                                <div className="flex items-center gap-1">
+                                  <Select
+                                    value={stage.escalate_agent}
+                                    onValueChange={(v) =>
+                                      handleStageUpdate(stageId, {
+                                        escalate_agent: v as AgentId,
+                                      })
+                                    }
+                                  >
+                                    <SelectTrigger className="h-6 text-[10px] min-w-[90px]">
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {AGENTS.map((a) => (
+                                        <SelectItem
+                                          key={a.value}
+                                          value={a.value}
+                                        >
+                                          {a.label}
+                                        </SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                  <span className="text-low text-[10px] whitespace-nowrap">
+                                    {t('afterAttempts')}
+                                  </span>
+                                  <Input
+                                    type="number"
+                                    min={1}
+                                    max={10}
+                                    value={stage.escalate_after_retries ?? 3}
+                                    onChange={(e) =>
+                                      handleStageUpdate(stageId, {
+                                        escalate_after_retries:
+                                          parseInt(e.target.value) || 3,
+                                      })
+                                    }
+                                    className="h-6 w-12 text-[10px] px-1"
+                                  />
+                                </div>
+                              )}
                           </div>
                         </td>
                       </tr>
@@ -370,9 +457,9 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
             <div className="flex items-center gap-half pt-half">
               <Checkbox
                 id="pipeline-create-pr"
-                checked={config.create_pr}
+                checked={config.auto_create_pr}
                 onCheckedChange={(checked) =>
-                  onChange({ ...config, create_pr: checked })
+                  onChange({ ...config, auto_create_pr: !!checked })
                 }
               />
               <label
