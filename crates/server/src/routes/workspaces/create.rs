@@ -20,6 +20,9 @@ use crate::{
     },
 };
 
+use db::models::pipeline_state::{CreatePipelineState, PipelineState};
+use services::services::pipeline_types::PipelineConfig;
+
 pub(crate) async fn create_workspace_record(
     deployment: &DeploymentImpl,
     name: Option<String>,
@@ -220,6 +223,7 @@ pub async fn create_and_start_workspace(
         executor_config,
         prompt,
         attachment_ids,
+        pipeline_config,
     } = payload;
 
     let mut workspace_prompt = normalize_prompt(&prompt).ok_or_else(|| {
@@ -299,6 +303,44 @@ pub async fn create_and_start_workspace(
         .container()
         .start_workspace(&workspace, executor_config.clone(), workspace_prompt)
         .await?;
+
+    // ── Pipeline initialisation (opt-in) ──────────────────────────
+    if let Some(ref config_json) = pipeline_config {
+        // Validate that the JSON is a valid PipelineConfig with at least one stage.
+        let config: PipelineConfig =
+            serde_json::from_str(config_json).map_err(|e| {
+                ApiError::BadRequest(format!("Invalid pipeline_config JSON: {e}"))
+            })?;
+
+        if config.stages.is_empty() {
+            return Err(ApiError::BadRequest(
+                "pipeline_config must contain at least one stage".to_string(),
+            ));
+        }
+
+        let first_stage_id = config.stages[0].id.clone();
+
+        PipelineState::create(
+            &deployment.db().pool,
+            &CreatePipelineState {
+                workspace_id: workspace.id,
+                pipeline_config: config_json.clone(),
+                first_stage_id,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create pipeline state: {}", e);
+            ApiError::BadRequest(format!("Failed to initialise pipeline: {e}"))
+        })?;
+
+        tracing::info!(
+            "Pipeline initialised for workspace {} with {} stages",
+            workspace.id,
+            config.stages.len()
+        );
+    }
 
     deployment
         .track_if_analytics_allowed(
