@@ -64,6 +64,7 @@ Pipeline is described as a JSON config stored as a pipeline profile.
     {
       "id": "reviewer",
       "role": "reviewer",
+      "mode": "consensus",
       "agent": "claude_code",
       "approval": "approval",
       "on_success": "builder",
@@ -115,11 +116,67 @@ Pipeline is described as a JSON config stored as a pipeline profile.
 | `role` | Stage role — determines the task the agent performs (planning, review, coding, testing) |
 | `agent` | Which AI agent executes this stage (claude_code, codex, gemini, etc.) |
 | `approval` | Whether user confirmation is required before this stage starts. `auto` — starts automatically, `approval` — waits for user OK |
+| `mode` | Review mode (Plan Reviewer only). `consensus` — reviewer can rewrite and improve the plan, agents converge through negotiation. `strict` — reviewer only critiques, does not rewrite. See Plan Reviewer Modes below |
 | `on_success` | Which stage to run after successful completion. `complete` = pipeline finished |
 | `on_fail` | What happens on failure. Can point to a previous stage for rework or `pause` for user decision |
 | `max_retries` | Max retry count for this specific stage's correction cycle. `null` = use `default_max_retries` |
 | `escalate_agent` | Second agent that takes over when primary fails after retries. Receives full context: plan, code, and errors |
 | `escalate_after_retries` | How many failed attempts before escalating to the second agent |
+
+## Plan Reviewer Modes
+
+Plan Reviewer supports two modes. Code Reviewer always uses strict mode.
+
+### Consensus Mode (default)
+
+Reviewer can rewrite, improve, and extend the plan. Both agents converge through negotiation over multiple rounds. Best for complex, ambiguous, or large tasks.
+
+**Cycle:**
+1. Planner creates plan
+2. Reviewer returns improved/revised plan with structured changes
+3. Planner reconciles, produces new agreed version
+4. Repeat until reviewer returns `approved` or max retries reached
+
+**Reviewer returns:**
+```json
+{
+  "verdict": "needs_changes",
+  "revised_plan": "full improved plan text",
+  "what_changed": ["added error handling step", "removed redundant migration"],
+  "why_changed": ["original plan missed DB rollback scenario"],
+  "unresolved_issues": ["unclear how auth tokens are refreshed"]
+}
+```
+
+**Planner revision prompt receives:** current plan + reviewer's revised_plan + what_changed + why_changed + unresolved_issues. Planner produces a new reconciled version.
+
+### Strict Mode
+
+Reviewer only critiques — does not rewrite the plan. Returns blockers, missing steps, risks. Planner fixes issues independently. Best for small tasks, automated pipelines, or when minimal drift is needed.
+
+**Reviewer returns:**
+```json
+{
+  "verdict": "needs_changes",
+  "summary": "plan is mostly good but missing error handling",
+  "blockers": ["no rollback step for migration"],
+  "non_blockers": ["could improve variable naming"],
+  "missing_steps": ["add DB backup before migration"],
+  "risks": ["migration timeout on large tables"],
+  "suggested_fixes": ["add step 4a: create backup"]
+}
+```
+
+**Planner revision prompt receives:** current plan + reviewer's structured feedback. Planner addresses each blocker/missing step.
+
+### Mode Selection
+
+| Mode | Best for | Default |
+|------|----------|---------|
+| `consensus` | Complex tasks, manual supervision, ambiguous requirements | Yes (Plan Reviewer) |
+| `strict` | Small tasks, automated runs, minimal drift needed | No |
+
+Code Reviewer always operates in strict mode — no plan rewriting, only code critique with file:line references.
 
 ## Architecture: PipelineController + Existing Execution Flow
 
@@ -385,11 +442,11 @@ Pipeline settings appear in the task creation form, next to agent selection:
 ┌────────────────────────────────────────────────┐
 │  Template: [Full Pipeline ▾]                   │
 │                                                │
-│  Planner      [Claude Code ▾]  [Auto    ▾] (?) │
-│  Reviewer     [Claude Code ▾]  [Approval▾] (?) │
-│  Builder      [Claude Code ▾]  [Auto    ▾] (?) │
-│  Code Review  [Claude Code ▾]  [Auto    ▾] (?) │
-│  Tester       [Claude Code ▾]  [Auto    ▾] (?) │
+│  Planner      [Claude Code ▾]  [Auto    ▾]      (?) │
+│  Reviewer     [Claude Code ▾]  [Approval▾] [Consensus ▾] (?) │
+│  Builder      [Claude Code ▾]  [Auto    ▾]      (?) │
+│  Code Review  [Claude Code ▾]  [Auto    ▾]      (?) │
+│  Tester       [Claude Code ▾]  [Auto    ▾]      (?) │
 │                                                │
 │  ☐ Second agent: [Codex ▾] after [3] attempts │
 │  ☑ Create PR after completion               (?)│
@@ -410,6 +467,7 @@ Pipeline checkbox disabled = single agent mode (current behavior).
 | Builder (?) | Пишет код по одобренному плану. Также исправляет баги найденные на ревью кода |
 | Code Review (?) | Проверяет написанный код на ошибки, баги и соответствие плану |
 | Tester (?) | Планирует тесты на основе ТЗ и архитектуры, пишет и запускает их |
+| Consensus/Strict (?) | Режим ревью плана. Consensus — ревьювер может переписывать и улучшать план, агенты договариваются через несколько раундов. Strict — ревьювер только критикует, не переписывает план |
 | Agent dropdown (?) | Какой AI-агент выполняет этот этап |
 | Approval dropdown (?) | Auto — этап запускается автоматически. Одобрение — ждёт вашего подтверждения перед началом |
 | Second agent (?) | Когда основной агент не может исправить ошибки после нескольких попыток, задача передаётся второму агенту с полным контекстом: план, код и описание ошибок |
