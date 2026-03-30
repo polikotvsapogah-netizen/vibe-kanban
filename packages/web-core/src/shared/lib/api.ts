@@ -1736,3 +1736,51 @@ export const searchApi = {
     return handleApiResponse<SearchResult[]>(response);
   },
 };
+
+// Pipeline API
+export interface PipelineStatusResponse {
+  current_stage: string;
+  status: string;
+  awaiting_approval: boolean;
+  stage_count: number;
+  current_stage_index: number;
+}
+
+export const pipelineApi = {
+  getStatus: async (workspaceId: string): Promise<PipelineStatusResponse> => {
+    const response = await makeRequest(
+      `/api/workspaces/${workspaceId}/pipeline/status`
+    );
+    return handleApiResponse<PipelineStatusResponse>(response);
+  },
+
+  approve: async (workspaceId: string): Promise<PipelineStatusResponse> => {
+    const response = await makeRequest(
+      `/api/workspaces/${workspaceId}/pipeline/approve`,
+      { method: 'POST' }
+    );
+    return handleApiResponse<PipelineStatusResponse>(response);
+  },
+
+  reject: async (
+    workspaceId: string,
+    feedback?: string
+  ): Promise<PipelineStatusResponse> => {
+    const response = await makeRequest(
+      `/api/workspaces/${workspaceId}/pipeline/reject`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ feedback }),
+      }
+    );
+    return handleApiResponse<PipelineStatusResponse>(response);
+  },
+
+  pause: async (workspaceId: string): Promise<PipelineStatusResponse> => {
+    const response = await makeRequest(
+      `/api/workspaces/${workspaceId}/pipeline/pause`,
+      { method: 'POST' }
+    );
+    return handleApiResponse<PipelineStatusResponse>(response);
+  },
+};
