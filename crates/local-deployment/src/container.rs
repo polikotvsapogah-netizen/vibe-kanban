@@ -17,6 +17,7 @@ use db::{
             ExecutionContext, ExecutionProcess, ExecutionProcessRunReason, ExecutionProcessStatus,
         },
         execution_process_repo_state::ExecutionProcessRepoState,
+        pipeline_state::PipelineState,
         repo::Repo,
         scratch::{DraftFollowUpData, Scratch, ScratchType},
         session::{Session, SessionError},
@@ -48,6 +49,7 @@ use services::services::{
     file::FileService,
     notification::NotificationService,
     pipeline_controller::{PipelineController, TransitionAction},
+    pipeline_executor,
     queued_message::QueuedMessageService,
     remote_client::RemoteClient,
     remote_sync,
@@ -606,7 +608,12 @@ impl LocalContainerService {
                                 }
                             }
                             Ok(TransitionAction::StartStage {
-                                stage_id, agent, ..
+                                stage_id,
+                                role,
+                                agent,
+                                session_id,
+                                prompt_additions,
+                                is_follow_up,
                             }) => {
                                 tracing::info!(
                                     "Pipeline transition: {} -> {} (agent: {})",
@@ -614,27 +621,124 @@ impl LocalContainerService {
                                     stage_id,
                                     agent
                                 );
-                                // TODO Phase 2: Start the next stage execution
+                                // Load pipeline state and start the next stage
+                                if let Ok(Some(pipeline_state)) =
+                                    PipelineState::find_by_workspace_id(&db.pool, ctx.workspace.id)
+                                        .await
+                                {
+                                    match pipeline_executor::start_pipeline_stage(
+                                        &container,
+                                        &db.pool,
+                                        &ctx.workspace,
+                                        &pipeline_state,
+                                        &stage_id,
+                                        &role,
+                                        &agent,
+                                        session_id,
+                                        &prompt_additions,
+                                        is_follow_up,
+                                    )
+                                    .await
+                                    {
+                                        Ok(started) => {
+                                            tracing::info!(
+                                                "Pipeline stage '{}' started: exec={}, session={}",
+                                                stage_id,
+                                                started.execution_process_id,
+                                                started.session_id
+                                            );
+                                            // Update role_sessions in pipeline_state
+                                            let mut role_sessions: std::collections::HashMap<
+                                                String,
+                                                String,
+                                            > = serde_json::from_str(&pipeline_state.role_sessions)
+                                                .unwrap_or_default();
+                                            role_sessions.insert(
+                                                role.clone(),
+                                                started.session_id.to_string(),
+                                            );
+                                            if let Err(e) = PipelineState::update_stage(
+                                                &db.pool,
+                                                ctx.workspace.id,
+                                                &stage_id,
+                                                "running",
+                                                &pipeline_state.retry_counts,
+                                                &pipeline_state.stage_history,
+                                                &pipeline_state.handoff_artifacts,
+                                                &serde_json::to_string(&role_sessions)
+                                                    .unwrap_or_default(),
+                                            )
+                                            .await
+                                            {
+                                                tracing::error!(
+                                                    "Failed to update pipeline role_sessions: {}",
+                                                    e
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Failed to start pipeline stage '{}': {}",
+                                                stage_id,
+                                                e
+                                            );
+                                            // Rollback: set pipeline to paused
+                                            let _ = PipelineState::set_status(
+                                                &db.pool,
+                                                ctx.workspace.id,
+                                                "paused",
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                }
                             }
                             Ok(TransitionAction::AwaitApproval { stage_id }) => {
                                 tracing::info!(
                                     "Pipeline awaiting approval for stage: {}",
                                     stage_id
                                 );
-                                // TODO Phase 2: Send notification
+                                container
+                                    .notification_service()
+                                    .notify(
+                                        "Pipeline Approval Required",
+                                        &format!(
+                                            "Stage '{}' is waiting for your approval",
+                                            stage_id
+                                        ),
+                                        Some(ctx.workspace.id),
+                                    )
+                                    .await;
                             }
                             Ok(TransitionAction::Completed) => {
                                 tracing::info!(
                                     "Pipeline completed for workspace {}",
                                     ctx.workspace.id
                                 );
+                                container
+                                    .notification_service()
+                                    .notify(
+                                        "Pipeline Complete",
+                                        "All stages finished successfully",
+                                        Some(ctx.workspace.id),
+                                    )
+                                    .await;
+                                container.finalize_task(&ctx).await;
+                                already_finalized = true;
                             }
                             Ok(TransitionAction::ReadyForPr) => {
                                 tracing::info!(
                                     "Pipeline ready for PR for workspace {}",
                                     ctx.workspace.id
                                 );
-                                // TODO Phase 2: Auto-create PR if conditions met
+                                container
+                                    .notification_service()
+                                    .notify(
+                                        "Pipeline Ready for PR",
+                                        "All stages passed. Create a Pull Request to proceed.",
+                                        Some(ctx.workspace.id),
+                                    )
+                                    .await;
                             }
                             Ok(TransitionAction::Paused { reason }) => {
                                 tracing::warn!(
@@ -642,7 +746,10 @@ impl LocalContainerService {
                                     ctx.workspace.id,
                                     reason
                                 );
-                                // TODO Phase 2: Send notification
+                                container
+                                    .notification_service()
+                                    .notify("Pipeline Paused", &reason, Some(ctx.workspace.id))
+                                    .await;
                             }
                             Err(e) => {
                                 tracing::error!(
