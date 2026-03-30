@@ -403,69 +403,80 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
                           </div>
                         </td>
 
-                        {/* Second agent (global toggle) */}
-                        <td className="py-1.5 pl-2">
-                          <div className="flex flex-col gap-1">
-                            <div className="flex items-center gap-1">
-                              <Checkbox
-                                checked={config.enable_second_agent}
-                                onCheckedChange={(checked) =>
-                                  toggleSecondAgent(!!checked)
-                                }
-                              />
-                              <InfoTooltip text={t('tooltips.secondAgent')} />
-                            </div>
-                            {config.enable_second_agent &&
-                              stage.escalate_agent && (
-                                <div className="flex items-center gap-1">
-                                  <Select
-                                    value={stage.escalate_agent}
-                                    onValueChange={(v) =>
-                                      handleStageUpdate(stageId, {
-                                        escalate_agent: v as AgentId,
-                                      })
-                                    }
-                                  >
-                                    <SelectTrigger className="h-6 text-[10px] min-w-[90px]">
-                                      <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      {AGENTS.map((a) => (
-                                        <SelectItem
-                                          key={a.value}
-                                          value={a.value}
-                                        >
-                                          {a.label}
-                                        </SelectItem>
-                                      ))}
-                                    </SelectContent>
-                                  </Select>
-                                  <span className="text-low text-[10px] whitespace-nowrap">
-                                    {t('afterAttempts')}
-                                  </span>
-                                  <Input
-                                    type="number"
-                                    min={1}
-                                    max={10}
-                                    value={stage.escalate_after_retries ?? 3}
-                                    onChange={(e) =>
-                                      handleStageUpdate(stageId, {
-                                        escalate_after_retries:
-                                          parseInt(e.target.value) || 3,
-                                      })
-                                    }
-                                    className="h-6 w-12 text-[10px] px-1"
-                                  />
-                                </div>
-                              )}
-                          </div>
-                        </td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
             </div>
+
+            {/* Second agent — global setting */}
+            <div className="flex items-center gap-half pt-half">
+              <Checkbox
+                id="pipeline-second-agent"
+                checked={config.enable_second_agent}
+                onCheckedChange={(checked) => toggleSecondAgent(!!checked)}
+              />
+              <label
+                htmlFor="pipeline-second-agent"
+                className="text-xs text-normal cursor-pointer select-none"
+              >
+                {t('secondAgent')}
+              </label>
+              <InfoTooltip text={t('tooltips.secondAgent')} />
+            </div>
+            {config.enable_second_agent && (
+              <div className="flex items-center gap-half pl-5 pb-half">
+                <Select
+                  value={
+                    config.stages.find((s) => s.escalate_agent)
+                      ?.escalate_agent ?? 'codex'
+                  }
+                  onValueChange={(v) => {
+                    // Update escalate_agent on all stages that have it
+                    const newStages = config.stages.map((s) =>
+                      s.escalate_agent != null
+                        ? { ...s, escalate_agent: v as AgentId }
+                        : s
+                    );
+                    onChange({ ...config, stages: newStages });
+                  }}
+                >
+                  <SelectTrigger className="h-6 text-[10px] min-w-[90px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {AGENTS.map((a) => (
+                      <SelectItem key={a.value} value={a.value}>
+                        {a.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <span className="text-low text-[10px] whitespace-nowrap">
+                  {t('afterAttempts')}
+                </span>
+                <Input
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={
+                    config.stages.find((s) => s.escalate_after_retries != null)
+                      ?.escalate_after_retries ?? 3
+                  }
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value) || 3;
+                    const newStages = config.stages.map((s) =>
+                      s.escalate_after_retries != null
+                        ? { ...s, escalate_after_retries: val }
+                        : s
+                    );
+                    onChange({ ...config, stages: newStages });
+                  }}
+                  className="h-6 w-12 text-[10px] px-1"
+                />
+              </div>
+            )}
 
             {/* Create PR checkbox */}
             <div className="flex items-center gap-half pt-half">
