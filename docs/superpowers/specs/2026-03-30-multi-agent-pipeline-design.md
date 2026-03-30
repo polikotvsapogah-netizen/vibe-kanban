@@ -59,17 +59,22 @@ Pipeline is described as a JSON config stored as a pipeline profile.
       "approval": "auto",
       "on_success": "reviewer",
       "on_fail": "pause",
-      "max_retries": null
+      "max_retries": null,
+      "workflow_profile": "brainstorming",
+      "workflow_mode": "consensus",
+      "policies": ["structured_verdict", "structured_handoff"]
     },
     {
       "id": "reviewer",
       "role": "reviewer",
-      "mode": "consensus",
       "agent": "claude_code",
       "approval": "approval",
       "on_success": "builder",
       "on_fail": "planner",
-      "max_retries": 7
+      "max_retries": 7,
+      "workflow_profile": "brainstorming",
+      "workflow_mode": "consensus",
+      "policies": ["structured_verdict", "structured_handoff"]
     },
     {
       "id": "builder",
@@ -78,7 +83,10 @@ Pipeline is described as a JSON config stored as a pipeline profile.
       "approval": "auto",
       "on_success": "code_reviewer",
       "on_fail": "pause",
-      "max_retries": null
+      "max_retries": null,
+      "workflow_profile": "executing-plans",
+      "workflow_mode": "batched",
+      "policies": ["structured_verdict", "structured_handoff"]
     },
     {
       "id": "code_reviewer",
@@ -88,7 +96,9 @@ Pipeline is described as a JSON config stored as a pipeline profile.
       "on_success": "tester",
       "on_fail": "builder",
       "max_retries": 3,
-      "comment": "fix loops capped at 3, not 7"
+      "workflow_profile": "requesting-code-review",
+      "workflow_mode": "strict",
+      "policies": ["structured_verdict", "structured_handoff"]
     },
     {
       "id": "tester",
@@ -100,7 +110,9 @@ Pipeline is described as a JSON config stored as a pipeline profile.
       "escalate_agent": "codex",
       "escalate_after_retries": 3,
       "max_retries": 3,
-      "comment": "test loops capped at 3, not 7"
+      "workflow_profile": "verification-before-completion",
+      "workflow_mode": "strict",
+      "policies": ["structured_verdict", "structured_handoff", "require_tests", "no_done_without_verification"]
     }
   ]
 }
@@ -118,12 +130,68 @@ Pipeline is described as a JSON config stored as a pipeline profile.
 | `role` | Stage role — determines the task the agent performs (planning, review, coding, testing) |
 | `agent` | Which AI agent executes this stage (claude_code, codex, gemini, etc.) |
 | `approval` | Whether user confirmation is required before this stage starts. `auto` — starts automatically, `approval` — waits for user OK |
-| `mode` | Review mode (Plan Reviewer only). `consensus` — reviewer can rewrite and improve the plan, agents converge through negotiation. `strict` — reviewer only critiques, does not rewrite. See Plan Reviewer Modes below |
+| `mode` | **Deprecated in favor of `workflow_mode`.** Kept for backward compat. See Plan Reviewer Modes below |
 | `on_success` | Which stage to run after successful completion. `complete` = pipeline finished |
 | `on_fail` | What happens on failure. Can point to a previous stage for rework or `pause` for user decision |
 | `max_retries` | Max retry count for this specific stage's correction cycle. `null` = use `default_max_retries`. **Retry policy:** planning loop (Planner ↔ Reviewer) = 7 (broad exploration). Fix/test loops (Code Reviewer ↔ Builder, Tester ↔ Code Reviewer) = 3 (focused corrections) |
 | `escalate_agent` | Second agent that takes over when primary fails after retries. Receives full context: plan, code, and errors |
 | `escalate_after_retries` | How many failed attempts before escalating to the second agent |
+| `workflow_profile` | Which skill/workflow style to use for this stage. See Workflow Profiles section. Controller uses this to select the prompt pack |
+| `workflow_mode` | Local mode within the profile (e.g., `consensus` / `strict` for brainstorming, `batched` / `direct` for executing-plans) |
+| `policies` | Array of orthogonal rules that can be combined: `structured_verdict`, `structured_handoff`, `use_subagents`, `require_tests`, `require_root_cause`, `no_done_without_verification`, `auto_create_pr_if_possible` |
+
+## Workflow Profiles
+
+Behavioral layer on top of the pipeline engine. Maps superpowers skills to pipeline stages as configurable presets. Controller does not know skill internals — it only knows which prompt pack and policies to apply.
+
+**Core principle:** Pipeline engine is generic. Workflow profiles are the preferred execution style, not a hard dependency. Different agent types can have different profile sets.
+
+### Profile Registry
+
+| Profile | Based on Skill | Best for |
+|---------|---------------|----------|
+| `brainstorming` | superpowers:brainstorming | Planner, Reviewer (consensus mode) |
+| `writing-plans` | superpowers:writing-plans | Planner (detailed implementation plans) |
+| `executing-plans` | superpowers:executing-plans | Builder (task-by-task execution) |
+| `subagent-driven-development` | superpowers:subagent-driven-development | Builder (large tasks, parallel modules) |
+| `requesting-code-review` | superpowers:requesting-code-review | Code Reviewer |
+| `receiving-code-review` | superpowers:receiving-code-review | Builder fix loop (after review feedback) |
+| `systematic-debugging` | superpowers:systematic-debugging | Builder fix loop (root cause analysis) |
+| `verification-before-completion` | superpowers:verification-before-completion | Tester |
+| `finishing-a-development-branch` | superpowers:finishing-a-development-branch | Pipeline completion (PR creation) |
+
+### Default Stage Profiles
+
+| Stage | workflow_profile | workflow_mode | policies |
+|-------|-----------------|---------------|----------|
+| Planner | `brainstorming` | `consensus` | `structured_verdict`, `structured_handoff` |
+| Reviewer | `brainstorming` | `consensus` or `strict` | `structured_verdict`, `structured_handoff` |
+| Builder | `executing-plans` | `batched` | `structured_verdict`, `structured_handoff` |
+| Builder (fix) | `receiving-code-review` | — | `structured_verdict`, `structured_handoff`, `require_root_cause` |
+| Code Reviewer | `requesting-code-review` | `strict` | `structured_verdict`, `structured_handoff` |
+| Tester | `verification-before-completion` | `strict` | `structured_verdict`, `structured_handoff`, `require_tests`, `no_done_without_verification` |
+
+### Policies Reference
+
+| Policy | Description |
+|--------|-------------|
+| `structured_verdict` | Agent must end response with JSON verdict block |
+| `structured_handoff` | Agent must produce structured handoff artifact for next stage |
+| `use_subagents` | Agent may spawn parallel subagents for independent subtasks |
+| `require_tests` | Agent must write and run tests before completing |
+| `require_root_cause` | Agent must identify root cause before fixing |
+| `no_done_without_verification` | Agent cannot report success without running verification |
+| `auto_create_pr_if_possible` | Attempt auto PR creation on pipeline completion |
+
+### How Controller Uses Profiles
+
+1. Controller reads `workflow_profile` from stage config
+2. Looks up the corresponding prompt template from profile registry
+3. Applies `workflow_mode` modifiers (consensus/strict, batched/direct)
+4. Appends `policies` as additional prompt instructions
+5. Injects the composed prompt via executor's `append_prompt`
+
+Controller never interprets skill logic — it just composes the prompt and enforces the verdict/handoff contract.
 
 ## Plan Reviewer Modes
 
