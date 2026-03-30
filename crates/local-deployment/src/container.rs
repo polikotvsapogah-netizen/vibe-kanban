@@ -47,6 +47,7 @@ use services::services::{
     diff_stream::{self, DiffStreamHandle},
     file::FileService,
     notification::NotificationService,
+    pipeline_controller::{PipelineController, TransitionAction},
     queued_message::QueuedMessageService,
     remote_client::RemoteClient,
     remote_sync,
@@ -593,9 +594,70 @@ impl LocalContainerService {
                     };
 
                     if should_start_next {
-                        // If the process exited successfully, start the next action
-                        if let Err(e) = container.try_start_next_action(&ctx).await {
-                            tracing::error!("Failed to start next action after completion: {}", e);
+                        // Check if this workspace has an active pipeline
+                        match PipelineController::handle_stage_completed(&db.pool, &ctx).await {
+                            Ok(TransitionAction::NoPipeline) => {
+                                // No pipeline — fall through to existing behavior
+                                if let Err(e) = container.try_start_next_action(&ctx).await {
+                                    tracing::error!(
+                                        "Failed to start next action after completion: {}",
+                                        e
+                                    );
+                                }
+                            }
+                            Ok(TransitionAction::StartStage {
+                                stage_id, agent, ..
+                            }) => {
+                                tracing::info!(
+                                    "Pipeline transition: {} -> {} (agent: {})",
+                                    ctx.execution_process.id,
+                                    stage_id,
+                                    agent
+                                );
+                                // TODO Phase 2: Start the next stage execution
+                            }
+                            Ok(TransitionAction::AwaitApproval { stage_id }) => {
+                                tracing::info!(
+                                    "Pipeline awaiting approval for stage: {}",
+                                    stage_id
+                                );
+                                // TODO Phase 2: Send notification
+                            }
+                            Ok(TransitionAction::Completed) => {
+                                tracing::info!(
+                                    "Pipeline completed for workspace {}",
+                                    ctx.workspace.id
+                                );
+                            }
+                            Ok(TransitionAction::ReadyForPr) => {
+                                tracing::info!(
+                                    "Pipeline ready for PR for workspace {}",
+                                    ctx.workspace.id
+                                );
+                                // TODO Phase 2: Auto-create PR if conditions met
+                            }
+                            Ok(TransitionAction::Paused { reason }) => {
+                                tracing::warn!(
+                                    "Pipeline paused for workspace {}: {}",
+                                    ctx.workspace.id,
+                                    reason
+                                );
+                                // TODO Phase 2: Send notification
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Pipeline controller error for workspace {}: {}",
+                                    ctx.workspace.id,
+                                    e
+                                );
+                                // Fall through to existing behavior on error
+                                if let Err(e) = container.try_start_next_action(&ctx).await {
+                                    tracing::error!(
+                                        "Failed to start next action after completion: {}",
+                                        e
+                                    );
+                                }
+                            }
                         }
                     } else {
                         tracing::info!(
