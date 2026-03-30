@@ -34,9 +34,9 @@ fn policy_instruction(policy: &str) -> Option<&'static str> {
         "require_tests" => Some(
             "You MUST write and run tests before completing. Do not report success without passing tests.",
         ),
-        "require_root_cause" => Some(
-            "Identify the root cause of each issue before fixing. Do not apply blind fixes.",
-        ),
+        "require_root_cause" => {
+            Some("Identify the root cause of each issue before fixing. Do not apply blind fixes.")
+        }
         "no_done_without_verification" => Some(
             "Do not report success without running verification commands and confirming output.",
         ),

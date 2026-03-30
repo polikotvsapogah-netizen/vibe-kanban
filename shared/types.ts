@@ -404,7 +404,13 @@ export type GetPrCommentsError = { "type": "no_pr_attached" } | { "type": "cli_n
 
 export type GetPrCommentsQuery = { repo_id: string, };
 
-export type CreateAndStartWorkspaceRequest = { name: string | null, repos: Array<WorkspaceRepoInput>, linked_issue: LinkedIssueInfo | null, executor_config: ExecutorConfig, prompt: string, attachment_ids: Array<string> | null, };
+export type CreateAndStartWorkspaceRequest = { name: string | null, repos: Array<WorkspaceRepoInput>, linked_issue: LinkedIssueInfo | null, executor_config: ExecutorConfig, prompt: string, attachment_ids: Array<string> | null, 
+/**
+ * Optional JSON-serialised PipelineConfig.  When provided the workspace
+ * is initialised with a multi-stage pipeline and the first execution is
+ * treated as the pipeline's first stage.
+ */
+pipeline_config: string | null, };
 
 export type CreateAndStartWorkspaceResponse = { workspace: Workspace, execution_process: ExecutionProcess, };
 
@@ -482,7 +488,31 @@ pr_number: bigint | null,
 /**
  * PR URL for this workspace (if any PR exists)
  */
-pr_url: string | null, };
+pr_url: string | null, 
+/**
+ * Current pipeline stage id (e.g. "builder"), None if no pipeline
+ */
+pipeline_stage?: string, 
+/**
+ * Pipeline status ("running", "paused", "completed", etc.), None if no pipeline
+ */
+pipeline_status?: string, 
+/**
+ * 1-based index of the current stage within the pipeline
+ */
+pipeline_stage_index?: number, 
+/**
+ * Total number of stages in the pipeline
+ */
+pipeline_total_stages?: number, 
+/**
+ * Retry attempt in "current/max" format (e.g. "1/3"), None if no retries
+ */
+pipeline_attempt?: string, 
+/**
+ * True if the pipeline is currently waiting for human approval
+ */
+pipeline_awaiting_approval?: boolean, };
 
 export type WorkspaceSummaryResponse = { summaries: Array<WorkspaceSummary>, };
 

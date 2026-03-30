@@ -10,10 +10,8 @@ use db::models::{
 };
 use executors::{
     actions::{
-        coding_agent_follow_up::CodingAgentFollowUpRequest,
-        coding_agent_initial::CodingAgentInitialRequest,
-        review::ReviewRequest,
-        ExecutorAction, ExecutorActionType,
+        ExecutorAction, ExecutorActionType, coding_agent_follow_up::CodingAgentFollowUpRequest,
+        coding_agent_initial::CodingAgentInitialRequest, review::ReviewRequest,
     },
     executors::BaseCodingAgent,
     profile::ExecutorConfig,
@@ -23,9 +21,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::services::{
-    container::ContainerService,
-    pipeline_prompts,
-    pipeline_types::PipelineConfig,
+    container::ContainerService, pipeline_prompts, pipeline_types::PipelineConfig,
 };
 
 // ── Error type ─────────────────────────────────────────────────────
