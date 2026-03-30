@@ -7,7 +7,7 @@ Add a multi-agent pipeline feature to Vibe Kanban that chains multiple AI agent 
 ## Pipeline Stages (Default — 5 stages)
 
 ```
-Planner ↔ Reviewer (2-3 cycles)
+Planner ↔ Reviewer (up to 7 cycles, stops on first approved)
          │
          ▼ structured handoff
 Builder → Code Reviewer → Builder (fix, follow-up) → Tester
@@ -49,7 +49,7 @@ Pipeline is described as a JSON config stored as a pipeline profile.
 {
   "name": "Full Pipeline",
   "enable_second_agent": false,
-  "default_max_retries": 3,
+  "default_max_retries": 7,
   "auto_create_pr": true,
   "stages": [
     {
@@ -109,7 +109,7 @@ Pipeline is described as a JSON config stored as a pipeline profile.
 |-------|-------------|
 | `name` | Pipeline profile display name |
 | `enable_second_agent` | Enable second AI agent for escalation when primary agent fails after retries |
-| `default_max_retries` | Default maximum retry count for all stages with correction cycles (default: 3) |
+| `default_max_retries` | Default maximum retry count for all stages with correction cycles (default: 7). Cycle stops on first `approved` verdict — this is an upper bound, not a target |
 | `auto_create_pr` | Automatically create a Pull Request after successful pipeline completion (gated: single-repo + valid auth only, otherwise status = `ready_for_pr`) |
 | `id` | Unique stage identifier |
 | `role` | Stage role — determines the task the agent performs (planning, review, coding, testing) |
@@ -161,12 +161,12 @@ Parse verdict from CodingAgentTurn.summary
 
 PipelineController must guarantee:
 - **One active stage per workspace** — check `pipeline_states.status == running` and `current_stage_id` before starting
-- **Atomic transitions** — update `pipeline_states` + start execution in single SQLite transaction
+- **Safe transitions** — update `pipeline_states` in DB first, then start execution. If execution start fails, rollback `pipeline_states` to previous state. Note: true DB+process atomicity is not possible since child process spawn happens outside DB transactions
 - **Dedupe callbacks** — exit monitor passes `execution_process_id`; controller checks it matches current stage in `stage_history`. Already processed → skip
 
 ## Verdict Contract
 
-Verdict is parsed from `CodingAgentTurn.summary` using a strict JSON template. Each role's prompt ends with:
+Verdict is parsed from `CodingAgentTurn.summary`. Each role's prompt ends with:
 
 ```
 End your response with a verdict block:
@@ -175,31 +175,55 @@ End your response with a verdict block:
 \`\`\`
 ```
 
-PipelineController parses the last summary, looks for the JSON block:
-- Found + valid → use as verdict
-- Not found or unparseable → treat as `failed`, set pipeline to `paused`
+### Verdict Parsing Strategy
+
+`CodingAgentTurn.summary` is currently truncated to 4096 characters. A long final response can cut off the verdict JSON block. To handle this:
+
+1. **v1**: Parse verdict from the **end** of summary — scan last 1024 characters for a JSON block matching the verdict schema. If not found, treat as `failed` → `paused`
+2. **Future**: Add a dedicated `stage_verdict` field to `CodingAgentTurn` (requires migration) for reliable storage independent of summary truncation
 
 Agents always exit with code 0. Both `approved` and `needs_changes` are successful exits. Exit code != 0 means crash/error, not a stage verdict.
 
 ## Stage Approval Contract
 
-When a stage has `approval: "approval"`, PipelineController pauses before starting it.
+When a stage has `approval: "approval"`, PipelineController pauses **before starting** that stage.
 
-Pipeline state fields for approval:
+### Pre-stage Approval (before execution)
+
+Pipeline pauses and presents the handoff from the previous stage for user review:
 
 ```json
 {
   "awaiting_approval": true,
   "approval_stage_id": "reviewer",
+  "approval_type": "pre_stage",
   "approval_payload": {
-    "verdict": "approved",
-    "summary": "plan reviewed",
-    "handoff": { "..." }
+    "from_stage": "planner",
+    "handoff": {
+      "final_plan": "...",
+      "constraints": ["..."]
+    }
   }
 }
 ```
 
-API endpoints:
+User sees what will be passed to the next stage and decides: approve (proceed) or reject (go back).
+
+### Post-stage Result (after execution)
+
+Not an approval gate — this is the verdict from the completed stage, stored separately in `stage_history`:
+
+```json
+{
+  "stage_id": "reviewer",
+  "verdict": "approved",
+  "summary": "plan reviewed, no issues",
+  "handoff": { "..." }
+}
+```
+
+### API Endpoints
+
 - `POST /api/workspaces/:id/pipeline/approve` — continue pipeline to next stage
 - `POST /api/workspaces/:id/pipeline/reject` — return to previous stage with user feedback
 - `POST /api/workspaces/:id/pipeline/pause` — manually pause pipeline
@@ -414,12 +438,13 @@ Details (stage history, logs, errors) visible on card click.
 
 ### Kanban Column Transitions
 
-All internal pipeline stages stay in **In Progress**. In Review only on PR open.
+All internal pipeline stages stay in **In Progress**. `ready_for_pr` is a pipeline status inside `pipeline_states`, NOT a kanban column.
 
 Uses existing Vibe Kanban auto-move mechanisms:
 - **Todo → In Progress**: workspace creation (already exists)
-- **In Progress → ready_for_pr**: pipeline completes successfully
-- **ready_for_pr → In Review**: auto-create PR if conditions met (single-repo + valid auth + supported provider), otherwise stays as `ready_for_pr` for manual PR creation
+- Pipeline completes → `pipeline_states.status = ready_for_pr` (card stays in **In Progress**)
+- If `auto_create_pr` enabled + single-repo + valid auth → PR created automatically → card moves to **In Review**
+- If conditions not met → card stays in **In Progress** with `pipeline_states.status = ready_for_pr`, user creates PR manually
 - **In Review → Done**: PR merge (already exists)
 
 ## Key Files to Modify
