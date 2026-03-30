@@ -2,13 +2,16 @@ use std::collections::HashMap;
 
 use axum::{Json, extract::State, response::Json as ResponseJson};
 use db::models::{
+    pipeline_state::{CreatePipelineState, PipelineState},
     requests::{
         CreateAndStartWorkspaceRequest, CreateAndStartWorkspaceResponse, CreateWorkspaceApiRequest,
     },
     workspace::{CreateWorkspace, Workspace},
 };
 use deployment::Deployment;
-use services::services::container::ContainerService;
+use services::services::{
+    container::ContainerService, pipeline_prompts, pipeline_types::PipelineConfig,
+};
 use utils::response::ApiResponse;
 use uuid::Uuid;
 
@@ -19,9 +22,6 @@ use crate::{
         ImportedIssueAttachment, import_issue_attachments_from_remote,
     },
 };
-
-use db::models::pipeline_state::{CreatePipelineState, PipelineState};
-use services::services::{pipeline_prompts, pipeline_types::PipelineConfig};
 
 pub(crate) async fn create_workspace_record(
     deployment: &DeploymentImpl,
@@ -304,10 +304,8 @@ pub async fn create_and_start_workspace(
     // the correct stage prompt and verdict instruction.
     if let Some(ref config_json) = pipeline_config {
         // Validate that the JSON is a valid PipelineConfig with at least one stage.
-        let config: PipelineConfig =
-            serde_json::from_str(config_json).map_err(|e| {
-                ApiError::BadRequest(format!("Invalid pipeline_config JSON: {e}"))
-            })?;
+        let config: PipelineConfig = serde_json::from_str(config_json)
+            .map_err(|e| ApiError::BadRequest(format!("Invalid pipeline_config JSON: {e}")))?;
 
         if config.stages.is_empty() {
             return Err(ApiError::BadRequest(

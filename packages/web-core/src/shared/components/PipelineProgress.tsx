@@ -1,4 +1,3 @@
-import React from 'react';
 import { ArrowsClockwiseIcon, HandIcon } from '@phosphor-icons/react';
 import { cn } from '@/shared/lib/utils';
 
@@ -35,7 +34,7 @@ export function PipelineProgress({
           isCurrent && status === 'running' && 'bg-brand',
           isCurrent && (status === 'paused' || awaitingApproval) && 'bg-brand',
           isCurrent && status === 'failed' && 'bg-error',
-          !isCompleted && !isCurrent && 'bg-secondary',
+          !isCompleted && !isCurrent && 'bg-secondary'
         )}
       />
     );
@@ -52,9 +51,7 @@ export function PipelineProgress({
   return (
     <div className={cn('flex flex-col gap-half', className)}>
       {/* Dots row */}
-      <div className="flex items-center gap-1">
-        {dots}
-      </div>
+      <div className="flex items-center gap-1">{dots}</div>
 
       {/* Stage name + status icon */}
       <div className="flex items-center gap-half text-low">

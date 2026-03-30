@@ -182,8 +182,7 @@ pub async fn get_workspace_summaries(
                 pipeline_attempt,
                 pipeline_awaiting_approval,
             ) = if let Some(ps) = pipeline_states.get(&id) {
-                let config: Option<PipelineConfig> =
-                    serde_json::from_str(&ps.pipeline_config).ok();
+                let config: Option<PipelineConfig> = serde_json::from_str(&ps.pipeline_config).ok();
 
                 let (stage_index, total_stages) = if let Some(ref cfg) = config {
                     let total = cfg.stages.len() as u32;
@@ -203,8 +202,7 @@ pub async fn get_workspace_summaries(
                     let retry_counts: Option<HashMap<String, u32>> =
                         serde_json::from_str(&ps.retry_counts).ok();
                     if let Some(counts) = retry_counts {
-                        let current_retry =
-                            counts.get(&ps.current_stage_id).copied().unwrap_or(0);
+                        let current_retry = counts.get(&ps.current_stage_id).copied().unwrap_or(0);
                         if current_retry > 0 {
                             // Find max_retries for this stage.
                             // Format: "current/max" where current is 1-based attempt number

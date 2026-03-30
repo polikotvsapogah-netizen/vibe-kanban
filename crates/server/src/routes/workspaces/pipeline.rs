@@ -1,6 +1,11 @@
 use std::collections::HashMap;
 
-use axum::{Extension, Router, extract::State, response::Json as ResponseJson, routing::{get, post}};
+use axum::{
+    Extension, Router,
+    extract::State,
+    response::Json as ResponseJson,
+    routing::{get, post},
+};
 use db::models::{pipeline_state::PipelineState, workspace::Workspace};
 use deployment::Deployment;
 use serde::{Deserialize, Serialize};
@@ -41,10 +46,7 @@ pub fn router() -> Router<DeploymentImpl> {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-fn build_status_response(
-    state: &PipelineState,
-    config: &PipelineConfig,
-) -> PipelineStatusResponse {
+fn build_status_response(state: &PipelineState, config: &PipelineConfig) -> PipelineStatusResponse {
     // 1-based index for display consistency
     let current_stage_index = config
         .stages
@@ -158,7 +160,10 @@ pub async fn approve_pipeline(
                 prompt_additions.push(format!("Constraints:\n- {}", items.join("\n- ")));
             }
         }
-        if let Some(criteria) = artifact.get("acceptance_criteria").and_then(|v| v.as_array()) {
+        if let Some(criteria) = artifact
+            .get("acceptance_criteria")
+            .and_then(|v| v.as_array())
+        {
             let items: Vec<&str> = criteria.iter().filter_map(|c| c.as_str()).collect();
             if !items.is_empty() {
                 prompt_additions.push(format!("Acceptance criteria:\n- {}", items.join("\n- ")));
@@ -226,10 +231,7 @@ pub async fn approve_pipeline(
 
     // Update role_sessions with the new session.
     let mut role_sessions_updated = role_sessions;
-    role_sessions_updated.insert(
-        stage_config.role.clone(),
-        _started.session_id.to_string(),
-    );
+    role_sessions_updated.insert(stage_config.role.clone(), _started.session_id.to_string());
     let role_sessions_json = serde_json::to_string(&role_sessions_updated).unwrap_or_default();
 
     // Update the pipeline state to reflect the new stage is running.
@@ -252,12 +254,11 @@ pub async fn approve_pipeline(
     // Re-read the updated state.
     let updated_state = PipelineState::find_by_workspace_id(pool, workspace.id)
         .await?
-        .ok_or_else(|| {
-            ApiError::BadRequest("Pipeline state not found after update".to_string())
-        })?;
+        .ok_or_else(|| ApiError::BadRequest("Pipeline state not found after update".to_string()))?;
 
     Ok(ResponseJson(ApiResponse::success(build_status_response(
-        &updated_state, &config,
+        &updated_state,
+        &config,
     ))))
 }
 
@@ -407,12 +408,11 @@ pub async fn reject_pipeline(
 
     let updated_state = PipelineState::find_by_workspace_id(pool, workspace.id)
         .await?
-        .ok_or_else(|| {
-            ApiError::BadRequest("Pipeline state not found after update".to_string())
-        })?;
+        .ok_or_else(|| ApiError::BadRequest("Pipeline state not found after update".to_string()))?;
 
     Ok(ResponseJson(ApiResponse::success(build_status_response(
-        &updated_state, &config,
+        &updated_state,
+        &config,
     ))))
 }
 
@@ -444,11 +444,10 @@ pub async fn pause_pipeline(
 
     let updated_state = PipelineState::find_by_workspace_id(pool, workspace.id)
         .await?
-        .ok_or_else(|| {
-            ApiError::BadRequest("Pipeline state not found after update".to_string())
-        })?;
+        .ok_or_else(|| ApiError::BadRequest("Pipeline state not found after update".to_string()))?;
 
     Ok(ResponseJson(ApiResponse::success(build_status_response(
-        &updated_state, &config,
+        &updated_state,
+        &config,
     ))))
 }

@@ -9,6 +9,7 @@ import enSettings from './locales/en/settings.json';
 import enProjects from './locales/en/projects.json';
 import enTasks from './locales/en/tasks.json';
 import enOrganization from './locales/en/organization.json';
+import enPipeline from './locales/en/pipeline.json';
 import frCommon from './locales/fr/common.json';
 import frSettings from './locales/fr/settings.json';
 import frProjects from './locales/fr/projects.json';
@@ -47,6 +48,7 @@ const resources = {
     projects: enProjects,
     tasks: enTasks,
     organization: enOrganization,
+    pipeline: enPipeline,
   },
   fr: {
     common: frCommon,

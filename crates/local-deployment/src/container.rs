@@ -651,13 +651,19 @@ impl LocalContainerService {
                                             // retry_counts, stage_history, handoff_artifacts, current_stage_id)
                                             // — only merge the new role_sessions to avoid overwriting with stale data.
                                             if let Ok(Some(fresh_state)) =
-                                                PipelineState::find_by_workspace_id(&db.pool, ctx.workspace.id).await
+                                                PipelineState::find_by_workspace_id(
+                                                    &db.pool,
+                                                    ctx.workspace.id,
+                                                )
+                                                .await
                                             {
                                                 let mut role_sessions: std::collections::HashMap<
                                                     String,
                                                     String,
-                                                > = serde_json::from_str(&fresh_state.role_sessions)
-                                                    .unwrap_or_default();
+                                                > = serde_json::from_str(
+                                                    &fresh_state.role_sessions,
+                                                )
+                                                .unwrap_or_default();
                                                 role_sessions.insert(
                                                     role.clone(),
                                                     started.session_id.to_string(),
