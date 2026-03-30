@@ -16,34 +16,12 @@ import {
   TooltipTrigger,
 } from '@vibe/ui/components/RadixTooltip';
 import { InfoIcon } from 'lucide-react';
+import type { PipelineConfig, StageConfig } from 'shared/types';
 
 // ---------- Backend-compatible Types ----------
 
 type AgentId = 'claude_code' | 'codex' | 'gemini';
 type ApprovalMode = 'auto' | 'approval';
-
-interface StageConfig {
-  id: string;
-  role: string;
-  agent: string;
-  approval: string;
-  on_success: string;
-  on_fail: string;
-  max_retries: number | null;
-  escalate_agent?: string | null;
-  escalate_after_retries?: number | null;
-  workflow_profile?: string | null;
-  workflow_mode?: string | null;
-  policies: string[];
-}
-
-export interface PipelineConfig {
-  name: string;
-  enable_second_agent: boolean;
-  default_max_retries: number;
-  auto_create_pr: boolean;
-  stages: StageConfig[];
-}
 
 interface PipelineSettingsProps {
   value: PipelineConfig | null;
@@ -93,6 +71,8 @@ function getDefaultConfig(): PipelineConfig {
         on_success: 'reviewer',
         on_fail: 'pause',
         max_retries: null,
+        escalate_agent: null,
+        escalate_after_retries: null,
         workflow_profile: 'brainstorming',
         workflow_mode: 'consensus',
         policies: ['structured_verdict', 'structured_handoff'],
@@ -105,6 +85,8 @@ function getDefaultConfig(): PipelineConfig {
         on_success: 'builder',
         on_fail: 'planner',
         max_retries: 7,
+        escalate_agent: null,
+        escalate_after_retries: null,
         workflow_profile: 'brainstorming',
         workflow_mode: 'consensus',
         policies: ['structured_verdict', 'structured_handoff'],
@@ -117,6 +99,8 @@ function getDefaultConfig(): PipelineConfig {
         on_success: 'code_reviewer',
         on_fail: 'pause',
         max_retries: null,
+        escalate_agent: null,
+        escalate_after_retries: null,
         workflow_profile: 'executing-plans',
         workflow_mode: 'batched',
         policies: ['structured_verdict', 'structured_handoff'],
@@ -129,6 +113,8 @@ function getDefaultConfig(): PipelineConfig {
         on_success: 'tester',
         on_fail: 'builder',
         max_retries: 3,
+        escalate_agent: null,
+        escalate_after_retries: null,
         workflow_profile: 'requesting-code-review',
         workflow_mode: 'strict',
         policies: ['structured_verdict', 'structured_handoff'],
@@ -160,6 +146,8 @@ function getDefaultConfig(): PipelineConfig {
         on_success: 'complete',
         on_fail: 'tester',
         max_retries: 2,
+        escalate_agent: null,
+        escalate_after_retries: null,
         workflow_profile: 'finishing-a-development-branch',
         workflow_mode: null,
         policies: ['structured_verdict', 'no_done_without_verification'],
@@ -205,8 +193,7 @@ const RU_TOOLTIPS: Record<string, string> = {
     'Проверяет план на качество и полноту. Возвращает на доработку при обнаружении проблем',
   builder:
     'Пишет код по утверждённому плану. Также исправляет баги, найденные при код-ревью',
-  codeReview:
-    'Проверяет написанный код на баги, ошибки и соответствие плану',
+  codeReview: 'Проверяет написанный код на баги, ошибки и соответствие плану',
   tester:
     'Планирует тесты на основе спецификации и архитектуры, пишет и запускает их',
   finisher:
@@ -216,18 +203,23 @@ const RU_TOOLTIPS: Record<string, string> = {
   strict: 'Ревьюер только критикует, не переписывает план',
   secondAgent:
     'Когда основной агент не справляется после повторных попыток, задача передаётся второму агенту с полным контекстом',
-  createPr:
-    'После прохождения всех этапов автоматически создать Pull Request',
+  createPr: 'После прохождения всех этапов автоматически создать Pull Request',
 };
 
 function InfoTooltip({ text, ruKey }: { text: string; ruKey?: string }) {
   const tooltip = ruKey ? RU_TOOLTIPS[ruKey] || text : text;
   return (
-    <Tooltip>
+    <Tooltip delayDuration={200}>
       <TooltipTrigger asChild>
-        <InfoIcon className="inline-block h-3.5 w-3.5 text-green-500 cursor-help ml-1 shrink-0" />
+        <span
+          role="button"
+          tabIndex={0}
+          className="inline-flex items-center cursor-help ml-1 shrink-0"
+        >
+          <InfoIcon className="h-3.5 w-3.5 text-green-500" />
+        </span>
       </TooltipTrigger>
-      <TooltipContent className="max-w-[280px]">
+      <TooltipContent side="top" className="max-w-[280px] z-[9999]">
         <p className="text-xs">{tooltip}</p>
       </TooltipContent>
     </Tooltip>
@@ -342,7 +334,10 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
                             <span className="text-normal font-medium">
                               {t(`stages.${i18nKey}`)}
                             </span>
-                            <InfoTooltip text={t(`tooltips.${i18nKey}`)} ruKey={i18nKey} />
+                            <InfoTooltip
+                              text={t(`tooltips.${i18nKey}`)}
+                              ruKey={i18nKey}
+                            />
                           </div>
                         </td>
 
@@ -429,7 +424,6 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
                             )}
                           </div>
                         </td>
-
                       </tr>
                     );
                   })}
@@ -450,7 +444,10 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
               >
                 {t('secondAgent')}
               </label>
-              <InfoTooltip text={t('tooltips.secondAgent')} ruKey="secondAgent" />
+              <InfoTooltip
+                text={t('tooltips.secondAgent')}
+                ruKey="secondAgent"
+              />
             </div>
             {config.enable_second_agent && (
               <div className="flex items-center gap-half pl-5 pb-half">
