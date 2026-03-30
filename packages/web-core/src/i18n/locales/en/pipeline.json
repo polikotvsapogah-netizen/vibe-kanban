@@ -7,7 +7,8 @@
     "reviewer": "Reviewer",
     "builder": "Builder",
     "codeReview": "Code Review",
-    "tester": "Tester"
+    "tester": "Tester",
+    "finisher": "Finisher"
   },
   "agent": "Agent",
   "approval": "Approval",
@@ -37,6 +38,7 @@
     "builder": "Writes code following the approved plan. Also fixes bugs found in code review",
     "codeReview": "Reviews written code for bugs, errors, and plan compliance",
     "tester": "Plans tests based on spec and architecture, writes and runs them",
+    "finisher": "Verifies all tests pass, prepares branch for merge, creates Pull Request with structured description",
     "consensus": "Reviewer can rewrite and improve the plan. Agents negotiate over multiple rounds",
     "strict": "Reviewer only critiques, does not rewrite the plan",
     "secondAgent": "When primary agent fails after retries, task is passed to second agent with full context",

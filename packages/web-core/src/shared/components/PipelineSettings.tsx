@@ -59,6 +59,7 @@ const STAGE_KEYS = [
   'builder',
   'code_reviewer',
   'tester',
+  'finisher',
 ] as const;
 
 /** Map from stage id to the translation key used in the UI */
@@ -68,6 +69,7 @@ const STAGE_I18N_KEY: Record<string, string> = {
   builder: 'builder',
   code_reviewer: 'codeReview',
   tester: 'tester',
+  finisher: 'finisher',
 };
 
 const AGENTS: { value: AgentId; label: string }[] = [
@@ -136,7 +138,7 @@ function getDefaultConfig(): PipelineConfig {
         role: 'tester',
         agent: 'claude_code',
         approval: 'auto',
-        on_success: 'complete',
+        on_success: 'finisher',
         on_fail: 'code_reviewer',
         max_retries: 3,
         escalate_agent: 'codex',
@@ -149,6 +151,18 @@ function getDefaultConfig(): PipelineConfig {
           'require_tests',
           'no_done_without_verification',
         ],
+      },
+      {
+        id: 'finisher',
+        role: 'finisher',
+        agent: 'claude_code',
+        approval: 'auto',
+        on_success: 'complete',
+        on_fail: 'tester',
+        max_retries: 2,
+        workflow_profile: 'finishing-a-development-branch',
+        workflow_mode: null,
+        policies: ['structured_verdict', 'no_done_without_verification'],
       },
     ],
   };

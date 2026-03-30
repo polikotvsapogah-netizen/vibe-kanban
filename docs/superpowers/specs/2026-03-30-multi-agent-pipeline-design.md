@@ -2,15 +2,15 @@
 
 ## Overview
 
-Add a multi-agent pipeline feature to Vibe Kanban that chains multiple AI agent stages (Planner, Reviewer, Builder, Code Reviewer, Tester) with configurable agents, approval policies, retry cycles, and escalation to a second agent.
+Add a multi-agent pipeline feature to Vibe Kanban that chains multiple AI agent stages (Planner, Reviewer, Builder, Code Reviewer, Tester, Finisher) with configurable agents, approval policies, retry cycles, and escalation to a second agent.
 
-## Pipeline Stages (Default — 5 stages)
+## Pipeline Stages (Default — 6 stages)
 
 ```
 Planner ↔ Reviewer (up to 7 cycles, stops on first approved)
          │
          ▼ structured handoff
-Builder → Code Reviewer → Builder (fix, follow-up) → Tester
+Builder → Code Reviewer → Builder (fix, follow-up) → Tester → Finisher
               ↑                                        |
               └────────────────────────────────────────┘
 ```
@@ -20,6 +20,7 @@ Builder → Code Reviewer → Builder (fix, follow-up) → Tester
 3. **Builder** — writes code following the approved plan. Also acts as Fixer via follow-up when Code Reviewer finds issues
 4. **Code Reviewer** — reviews written code via existing review route. Fail → Builder (follow-up fix)
 5. **Tester** — plans tests based on spec and architecture, writes and runs them. Fail → back to Code Reviewer
+6. **Finisher** — runs final test suite, verifies everything passes, pushes branch, creates PR with structured description. Fail → back to Tester
 
 Fixer is not a separate stage — it is Builder follow-up within the same session.
 
@@ -37,9 +38,12 @@ Fixer is not a separate stage — it is Builder follow-up within the same sessio
 | Code Reviewer | approved | Tester |
 | Code Reviewer | needs_changes | Builder (follow-up fix) |
 | Code Reviewer | retry exhausted | escalate / pause |
-| Tester | approved | ready_for_pr / complete |
+| Tester | approved | Finisher |
 | Tester | needs_changes | Code Reviewer |
 | Tester | retry exhausted | escalate / pause |
+| Finisher | approved | complete |
+| Finisher | needs_changes | Tester |
+| Finisher | retry exhausted | pause |
 
 ## Pipeline Config Structure
 
@@ -105,7 +109,7 @@ Pipeline is described as a JSON config stored as a pipeline profile.
       "role": "tester",
       "agent": "claude_code",
       "approval": "auto",
-      "on_success": "complete",
+      "on_success": "finisher",
       "on_fail": "code_reviewer",
       "escalate_agent": "codex",
       "escalate_after_retries": 3,
@@ -113,6 +117,18 @@ Pipeline is described as a JSON config stored as a pipeline profile.
       "workflow_profile": "verification-before-completion",
       "workflow_mode": "strict",
       "policies": ["structured_verdict", "structured_handoff", "require_tests", "no_done_without_verification"]
+    },
+    {
+      "id": "finisher",
+      "role": "finisher",
+      "agent": "claude_code",
+      "approval": "auto",
+      "on_success": "complete",
+      "on_fail": "tester",
+      "max_retries": 2,
+      "workflow_profile": "finishing-a-development-branch",
+      "workflow_mode": null,
+      "policies": ["structured_verdict", "no_done_without_verification"]
     }
   ]
 }
@@ -159,7 +175,7 @@ Profiles are **internal versioned prompt-pack IDs** bundled with the pipeline en
 | `receiving-code-review` | superpowers:receiving-code-review | Builder fix loop (after review feedback) |
 | `systematic-debugging` | superpowers:systematic-debugging | Builder fix loop (root cause analysis) |
 | `verification-before-completion` | superpowers:verification-before-completion | Tester |
-| `finishing-a-development-branch` | superpowers:finishing-a-development-branch | Pipeline completion (PR creation) |
+| `finishing-a-development-branch` | superpowers:finishing-a-development-branch | Finisher |
 
 Each profile is a hardcoded prompt template in `pipeline_controller`. No external file dependency.
 
@@ -173,6 +189,7 @@ Each profile is a hardcoded prompt template in `pipeline_controller`. No externa
 | Builder (fix) | `receiving-code-review` | — | `structured_verdict`, `structured_handoff`, `require_root_cause` |
 | Code Reviewer | `requesting-code-review` | `strict` | `structured_verdict`, `structured_handoff` |
 | Tester | `verification-before-completion` | `strict` | `structured_verdict`, `structured_handoff`, `require_tests`, `no_done_without_verification` |
+| Finisher | `finishing-a-development-branch` | — | `structured_verdict`, `no_done_without_verification` |
 
 ### Policies Reference
 
@@ -434,7 +451,8 @@ Each role gets its own session, reused across retry cycles via follow-up:
     "reviewer": "session-uuid-2",
     "builder": "session-uuid-3",
     "code_reviewer": "session-uuid-4",
-    "tester": "session-uuid-5"
+    "tester": "session-uuid-5",
+    "finisher": "session-uuid-6"
   }
 }
 ```
@@ -541,6 +559,7 @@ Pipeline settings appear in the task creation form, next to agent selection:
 │  Builder      [Claude Code ▾]  [Auto    ▾]      (?) │
 │  Code Review  [Claude Code ▾]  [Auto    ▾]      (?) │
 │  Tester       [Claude Code ▾]  [Auto    ▾]      (?) │
+│  Finisher     [Claude Code ▾]  [Auto    ▾]      (?) │
 │                                                │
 │  ☐ Second agent: [Codex ▾] after [3] attempts │
 │  ☑ Create PR after completion               (?)│
@@ -559,6 +578,7 @@ Pipeline checkbox disabled = single agent mode (current behavior).
 | Builder (?) | Пишет код по одобренному плану. Также исправляет баги найденные на ревью кода |
 | Code Review (?) | Проверяет написанный код на ошибки, баги и соответствие плану |
 | Tester (?) | Планирует тесты на основе ТЗ и архитектуры, пишет и запускает их |
+| Finisher (?) | Проверяет прохождение всех тестов, подготавливает ветку к мержу, создаёт Pull Request со структурированным описанием |
 | Consensus/Strict (?) | Режим ревью плана. Consensus — ревьювер может переписывать и улучшать план, агенты договариваются через несколько раундов. Strict — ревьювер только критикует, не переписывает план |
 | Agent dropdown (?) | Какой AI-агент выполняет этот этап |
 | Approval dropdown (?) | Auto — этап запускается автоматически. Одобрение — ждёт вашего подтверждения перед началом |
@@ -574,7 +594,7 @@ Compact progress indicator on the workspace card (via workspace_summary):
 ┌──────────────────────────────────┐
 │ Task Title                       │
 │                                  │
-│ ● ● ● ○ ○   Builder (3/5)       │
+│ ● ● ● ○ ○ ○   Builder (3/6)       │
 │ Attempt 1/3 · Claude Code    🔄 │
 └──────────────────────────────────┘
 ```

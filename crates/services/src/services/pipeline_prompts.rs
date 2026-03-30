@@ -34,6 +34,14 @@ const TESTER_PROMPT: &str = "You are a testing agent. Based on the task descript
 implementation: 1) Create a test plan covering key scenarios, 2) Write the tests, 3) Run the \
 tests and report results.";
 
+const FINISHER_PROMPT: &str = "You are a finalization agent. Your job is to prepare the code for merge: \
+1) Run the full test suite and verify all tests pass, \
+2) Run linter/formatter if available, \
+3) Review the git log to create a clear PR description, \
+4) Summarize: what was implemented, files changed, tests passing. \
+If tests fail, report the failures and do NOT approve. \
+If everything passes, approve with a summary suitable for a PR description.";
+
 const DEFAULT_PROMPT: &str = "You are a pipeline agent. Complete the assigned task carefully and \
 report your results.";
 
@@ -75,6 +83,7 @@ pub fn get_stage_prompt(
         "requesting-code-review" => CODE_REVIEWER_PROMPT,
         "receiving-code-review" => BUILDER_FIX_PROMPT,
         "verification-before-completion" => TESTER_PROMPT,
+        "finishing-a-development-branch" => FINISHER_PROMPT,
         _ => match role {
             "planner" => PLANNER_PROMPT,
             "reviewer" => {
@@ -87,6 +96,7 @@ pub fn get_stage_prompt(
             "builder" => BUILDER_PROMPT,
             "code_reviewer" => CODE_REVIEWER_PROMPT,
             "tester" => TESTER_PROMPT,
+            "finisher" => FINISHER_PROMPT,
             _ => DEFAULT_PROMPT,
         },
     };
@@ -142,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_verdict_always_appended() {
-        for role in &["planner", "reviewer", "builder", "code_reviewer", "tester"] {
+        for role in &["planner", "reviewer", "builder", "code_reviewer", "tester", "finisher"] {
             let prompt = get_stage_prompt(role, None, None, &[]);
             assert!(
                 prompt.contains("verdict"),
@@ -167,6 +177,19 @@ mod tests {
     fn test_workflow_profile_brainstorming_strict() {
         let prompt = get_stage_prompt("builder", Some("brainstorming"), Some("strict"), &[]);
         assert!(prompt.contains("strict mode"));
+    }
+
+    #[test]
+    fn test_finisher_role() {
+        let prompt = get_stage_prompt("finisher", None, None, &[]);
+        assert!(prompt.contains("finalization agent"));
+        assert!(prompt.contains("verdict"));
+    }
+
+    #[test]
+    fn test_workflow_profile_finishing() {
+        let prompt = get_stage_prompt("builder", Some("finishing-a-development-branch"), None, &[]);
+        assert!(prompt.contains("finalization agent"));
     }
 
     #[test]
