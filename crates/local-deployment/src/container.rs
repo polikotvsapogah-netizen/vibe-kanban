@@ -50,9 +50,10 @@ use services::services::{
     notification::NotificationService,
     pipeline_controller::{PipelineController, TransitionAction},
     pipeline_executor,
+    pipeline_pr::{self, AutoPrOutcome},
     queued_message::QueuedMessageService,
     remote_client::RemoteClient,
-    remote_sync,
+    remote_sync, verdict_parser,
 };
 use tokio::{sync::RwLock, task::JoinHandle};
 use tokio_util::io::ReaderStream;
@@ -743,14 +744,75 @@ impl LocalContainerService {
                                     "Pipeline ready for PR for workspace {}",
                                     ctx.workspace.id
                                 );
-                                container
-                                    .notification_service()
-                                    .notify(
-                                        "Pipeline Ready for PR",
-                                        "All stages passed. Create a Pull Request to proceed.",
-                                        Some(ctx.workspace.id),
-                                    )
-                                    .await;
+                                let default_title = ctx
+                                    .workspace
+                                    .name
+                                    .clone()
+                                    .unwrap_or_else(|| ctx.workspace.branch.clone());
+                                let pr_body = CodingAgentTurn::find_by_execution_process_id(
+                                    &db.pool,
+                                    ctx.execution_process.id,
+                                )
+                                .await
+                                .ok()
+                                .flatten()
+                                .and_then(|turn| turn.summary)
+                                .map(|summary| {
+                                    verdict_parser::parse_verdict(&summary)
+                                        .map(|verdict| verdict.summary)
+                                        .unwrap_or(summary)
+                                });
+
+                                match pipeline_pr::try_auto_create_pr(
+                                    &container,
+                                    &ctx.workspace,
+                                    &default_title,
+                                    pr_body.as_deref(),
+                                )
+                                .await
+                                {
+                                    Ok(AutoPrOutcome::Created { url }) => {
+                                        container
+                                            .notification_service()
+                                            .notify(
+                                                "Pipeline PR Created",
+                                                &format!("Pull Request created: {}", url),
+                                                Some(ctx.workspace.id),
+                                            )
+                                            .await;
+                                    }
+                                    Ok(AutoPrOutcome::Skipped { reason }) => {
+                                        container
+                                            .notification_service()
+                                            .notify(
+                                                "Pipeline Ready for PR",
+                                                &format!(
+                                                    "All stages passed. Auto-create PR skipped: {}",
+                                                    reason
+                                                ),
+                                                Some(ctx.workspace.id),
+                                            )
+                                            .await;
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Failed to auto-create PR for workspace {}: {}",
+                                            ctx.workspace.id,
+                                            e
+                                        );
+                                        container
+                                            .notification_service()
+                                            .notify(
+                                                "Pipeline Ready for PR",
+                                                &format!(
+                                                    "All stages passed, but auto-create PR failed: {}",
+                                                    e
+                                                ),
+                                                Some(ctx.workspace.id),
+                                            )
+                                            .await;
+                                    }
+                                }
                             }
                             Ok(TransitionAction::Paused { reason }) => {
                                 tracing::warn!(

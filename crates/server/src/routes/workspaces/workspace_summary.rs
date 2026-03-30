@@ -200,10 +200,8 @@ pub async fn get_workspace_summaries(
                 // Build "current/max" attempt string for the current stage.
                 // Always show attempt when pipeline is active: first attempt = "1/3".
                 let attempt_str = if let Some(ref cfg) = config {
-                    let current_stage_config = cfg
-                        .stages
-                        .iter()
-                        .find(|s| s.id == ps.current_stage_id);
+                    let current_stage_config =
+                        cfg.stages.iter().find(|s| s.id == ps.current_stage_id);
                     let max_retries = current_stage_config
                         .and_then(|s| s.max_retries)
                         .unwrap_or(cfg.default_max_retries);

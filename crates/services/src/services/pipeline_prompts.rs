@@ -152,7 +152,14 @@ mod tests {
 
     #[test]
     fn test_verdict_always_appended() {
-        for role in &["planner", "reviewer", "builder", "code_reviewer", "tester", "finisher"] {
+        for role in &[
+            "planner",
+            "reviewer",
+            "builder",
+            "code_reviewer",
+            "tester",
+            "finisher",
+        ] {
             let prompt = get_stage_prompt(role, None, None, &[]);
             assert!(
                 prompt.contains("verdict"),

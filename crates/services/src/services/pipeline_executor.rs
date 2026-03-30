@@ -11,7 +11,8 @@ use db::models::{
 };
 use executors::{
     actions::{
-        ExecutorAction, ExecutorActionType, coding_agent_follow_up::CodingAgentFollowUpRequest,
+        ExecutorAction, ExecutorActionType,
+        coding_agent_follow_up::CodingAgentFollowUpRequest,
         coding_agent_initial::CodingAgentInitialRequest,
         review::{RepoReviewContext, ReviewRequest},
     },
@@ -143,8 +144,7 @@ pub async fn start_pipeline_stage(
         };
 
         // Build review context from workspace repos.
-        let review_context = match WorkspaceRepo::find_repos_for_workspace(pool, workspace.id)
-            .await
+        let review_context = match WorkspaceRepo::find_repos_for_workspace(pool, workspace.id).await
         {
             Ok(repos) if !repos.is_empty() => {
                 let context = repos

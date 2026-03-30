@@ -351,9 +351,8 @@ pub async fn create_and_start_workspace(
 
     // If pipeline is configured, use the first stage's agent and handle approval.
     if let Some(ref config_json) = pipeline_config {
-        let config: PipelineConfig = serde_json::from_str(config_json).map_err(|e| {
-            ApiError::BadRequest(format!("Invalid pipeline_config JSON: {e}"))
-        })?;
+        let config: PipelineConfig = serde_json::from_str(config_json)
+            .map_err(|e| ApiError::BadRequest(format!("Invalid pipeline_config JSON: {e}")))?;
         let first_stage = &config.stages[0];
 
         // If first stage requires approval, set awaiting_approval and don't start execution.
@@ -361,9 +360,7 @@ pub async fn create_and_start_workspace(
             let _pipeline_state =
                 PipelineState::find_by_workspace_id(&deployment.db().pool, workspace.id)
                     .await?
-                    .ok_or_else(|| {
-                        ApiError::BadRequest("Pipeline state not found".to_string())
-                    })?;
+                    .ok_or_else(|| ApiError::BadRequest("Pipeline state not found".to_string()))?;
 
             let payload = serde_json::json!({ "stage_id": first_stage.id }).to_string();
             PipelineState::set_approval(
@@ -404,9 +401,7 @@ pub async fn create_and_start_workspace(
         let pipeline_state =
             PipelineState::find_by_workspace_id(&deployment.db().pool, workspace.id)
                 .await?
-                .ok_or_else(|| {
-                    ApiError::BadRequest("Pipeline state not found".to_string())
-                })?;
+                .ok_or_else(|| ApiError::BadRequest("Pipeline state not found".to_string()))?;
 
         // Create container first.
         deployment.container().create(&workspace).await?;

@@ -304,31 +304,21 @@ impl PipelineController {
             }
         };
 
-        // Build a handoff artifact for the next stage.
-        // Use verdict.revised_plan if available, otherwise fall back to summary.
-        let final_plan = verdict
-            .revised_plan
-            .clone()
-            .or_else(|| Some(verdict.summary.clone()));
-
-        // Carry forward constraints and acceptance_criteria from previous handoffs.
-        let prev_constraints = handoff_artifacts
-            .values()
-            .flat_map(|h| h.constraints.iter().cloned())
-            .collect::<Vec<_>>();
-        let prev_criteria = handoff_artifacts
-            .values()
-            .flat_map(|h| h.acceptance_criteria.iter().cloned())
-            .collect::<Vec<_>>();
+        let incoming = handoff_artifacts.get(&current_stage.id);
+        let final_plan = Self::derive_final_plan(verdict, incoming);
 
         let artifact = HandoffArtifact {
             from_stage: current_stage.id.clone(),
             to_stage: next_stage.id.clone(),
             review_summary: Some(verdict.summary.clone()),
             final_plan,
-            constraints: prev_constraints,
+            constraints: incoming
+                .map(|artifact| artifact.constraints.clone())
+                .unwrap_or_default(),
             risks: verdict.risks.clone(),
-            acceptance_criteria: prev_criteria,
+            acceptance_criteria: incoming
+                .map(|artifact| artifact.acceptance_criteria.clone())
+                .unwrap_or_default(),
             issues: verdict.issues.clone(),
             test_report: None,
         };
@@ -404,29 +394,21 @@ impl PipelineController {
 
             // Build a handoff with the review issues so the retry stage knows
             // what to fix.
-            let final_plan = verdict
-                .revised_plan
-                .clone()
-                .or_else(|| Some(verdict.summary.clone()));
-
-            // Carry forward constraints and acceptance_criteria from previous handoffs.
-            let prev_constraints = handoff_artifacts
-                .values()
-                .flat_map(|h| h.constraints.iter().cloned())
-                .collect::<Vec<_>>();
-            let prev_criteria = handoff_artifacts
-                .values()
-                .flat_map(|h| h.acceptance_criteria.iter().cloned())
-                .collect::<Vec<_>>();
+            let incoming = handoff_artifacts.get(&current_stage.id);
+            let final_plan = Self::derive_final_plan(verdict, incoming);
 
             let artifact = HandoffArtifact {
                 from_stage: current_stage.id.clone(),
                 to_stage: fail_stage.id.clone(),
                 review_summary: Some(verdict.summary.clone()),
                 final_plan,
-                constraints: prev_constraints,
+                constraints: incoming
+                    .map(|artifact| artifact.constraints.clone())
+                    .unwrap_or_default(),
                 risks: verdict.risks.clone(),
-                acceptance_criteria: prev_criteria,
+                acceptance_criteria: incoming
+                    .map(|artifact| artifact.acceptance_criteria.clone())
+                    .unwrap_or_default(),
                 issues: verdict.issues.clone(),
                 test_report: None,
             };
@@ -468,28 +450,21 @@ impl PipelineController {
                         }
                     };
 
-                    let final_plan = verdict
-                        .revised_plan
-                        .clone()
-                        .or_else(|| Some(verdict.summary.clone()));
-
-                    let prev_constraints = handoff_artifacts
-                        .values()
-                        .flat_map(|h| h.constraints.iter().cloned())
-                        .collect::<Vec<_>>();
-                    let prev_criteria = handoff_artifacts
-                        .values()
-                        .flat_map(|h| h.acceptance_criteria.iter().cloned())
-                        .collect::<Vec<_>>();
+                    let incoming = handoff_artifacts.get(&current_stage.id);
+                    let final_plan = Self::derive_final_plan(verdict, incoming);
 
                     let artifact = HandoffArtifact {
                         from_stage: current_stage.id.clone(),
                         to_stage: fail_stage.id.clone(),
                         review_summary: Some(verdict.summary.clone()),
                         final_plan,
-                        constraints: prev_constraints,
+                        constraints: incoming
+                            .map(|artifact| artifact.constraints.clone())
+                            .unwrap_or_default(),
                         risks: verdict.risks.clone(),
-                        acceptance_criteria: prev_criteria,
+                        acceptance_criteria: incoming
+                            .map(|artifact| artifact.acceptance_criteria.clone())
+                            .unwrap_or_default(),
                         issues: verdict.issues.clone(),
                         test_report: None,
                     };
@@ -534,6 +509,21 @@ impl PipelineController {
             if let Some(ref plan) = artifact.final_plan {
                 additions.push(format!("Revised plan: {}", plan));
             }
+            if !artifact.constraints.is_empty() {
+                additions.push(format!(
+                    "Constraints:\n- {}",
+                    artifact.constraints.join("\n- ")
+                ));
+            }
+            if !artifact.acceptance_criteria.is_empty() {
+                additions.push(format!(
+                    "Acceptance criteria:\n- {}",
+                    artifact.acceptance_criteria.join("\n- ")
+                ));
+            }
+            if !artifact.risks.is_empty() {
+                additions.push(format!("Known risks:\n- {}", artifact.risks.join("\n- ")));
+            }
             for issue in &artifact.issues {
                 let loc = match (&issue.file, issue.line) {
                     (Some(f), Some(l)) => format!(" ({}:{})", f, l),
@@ -542,8 +532,18 @@ impl PipelineController {
                 };
                 additions.push(format!("Issue{}: {}", loc, issue.description));
             }
+            if let Some(ref report) = artifact.test_report {
+                additions.push(format!("Test report:\n{}", report));
+            }
         }
         additions
+    }
+
+    fn derive_final_plan(verdict: &Verdict, incoming: Option<&HandoffArtifact>) -> Option<String> {
+        verdict
+            .revised_plan
+            .clone()
+            .or_else(|| incoming.and_then(|artifact| artifact.final_plan.clone()))
     }
 }
 
@@ -552,7 +552,7 @@ impl PipelineController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::pipeline_types::StageConfig;
+    use crate::services::pipeline_types::{StageConfig, VerdictIssue};
 
     /// Helper: build a minimal pipeline config with the given stages.
     fn make_config(stages: Vec<StageConfig>, auto_create_pr: bool) -> PipelineConfig {
@@ -783,5 +783,99 @@ mod tests {
             "Expected ReadyForPr, got {:?}",
             action_pr
         );
+    }
+
+    #[test]
+    fn test_strict_stage_preserves_incoming_final_plan() {
+        let reviewer = make_stage("reviewer", "builder", "planner");
+        let builder = make_stage("builder", "complete", "reviewer");
+        let config = make_config(vec![reviewer.clone(), builder.clone()], false);
+        let verdict = make_verdict(VerdictStatus::Approved);
+
+        let mut retries = HashMap::new();
+        let mut sessions = HashMap::new();
+        let mut artifacts = HashMap::new();
+        artifacts.insert(
+            "reviewer".to_string(),
+            HandoffArtifact {
+                from_stage: "planner".to_string(),
+                to_stage: "reviewer".to_string(),
+                final_plan: Some("agreed implementation plan".to_string()),
+                review_summary: Some("plan ready for review".to_string()),
+                constraints: vec!["keep API stable".to_string()],
+                risks: vec!["migration risk".to_string()],
+                acceptance_criteria: vec!["tests pass".to_string()],
+                issues: vec![],
+                test_report: None,
+            },
+        );
+
+        let session_id = Uuid::new_v4();
+        let stage_history: Vec<StageHistoryEntry> = vec![];
+        let action = PipelineController::determine_transition(
+            &config,
+            &reviewer,
+            Some(&verdict),
+            &mut retries,
+            &mut artifacts,
+            &mut sessions,
+            session_id,
+            &stage_history,
+        );
+
+        assert!(
+            matches!(action, TransitionAction::StartStage { .. }),
+            "Expected StartStage, got {:?}",
+            action
+        );
+
+        let builder_artifact = artifacts
+            .get("builder")
+            .expect("builder handoff should exist");
+        assert_eq!(
+            builder_artifact.final_plan.as_deref(),
+            Some("agreed implementation plan")
+        );
+        assert_eq!(
+            builder_artifact.constraints,
+            vec!["keep API stable".to_string()]
+        );
+        assert_eq!(
+            builder_artifact.acceptance_criteria,
+            vec!["tests pass".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_build_prompt_additions_include_full_handoff() {
+        let mut artifacts = HashMap::new();
+        artifacts.insert(
+            "builder".to_string(),
+            HandoffArtifact {
+                from_stage: "reviewer".to_string(),
+                to_stage: "builder".to_string(),
+                final_plan: Some("implement feature".to_string()),
+                review_summary: Some("review passed".to_string()),
+                constraints: vec!["keep api stable".to_string()],
+                risks: vec!["migration may be slow".to_string()],
+                acceptance_criteria: vec!["tests pass".to_string()],
+                issues: vec![VerdictIssue {
+                    file: Some("src/lib.rs".to_string()),
+                    line: Some(42),
+                    description: "handle timeout".to_string(),
+                }],
+                test_report: Some("2 passed, 0 failed".to_string()),
+            },
+        );
+
+        let additions = PipelineController::build_prompt_additions(&artifacts, "builder");
+        let combined = additions.join("\n");
+
+        assert!(combined.contains("Revised plan: implement feature"));
+        assert!(combined.contains("Constraints:\n- keep api stable"));
+        assert!(combined.contains("Acceptance criteria:\n- tests pass"));
+        assert!(combined.contains("Known risks:\n- migration may be slow"));
+        assert!(combined.contains("Issue (src/lib.rs:42): handle timeout"));
+        assert!(combined.contains("Test report:\n2 passed, 0 failed"));
     }
 }
