@@ -9,7 +9,12 @@ const SCAN_TAIL_BYTES: usize = 1024;
 /// 2. Raw JSON objects that contain a `"verdict"` key
 pub fn parse_verdict(summary: &str) -> Option<Verdict> {
     let tail = if summary.len() > SCAN_TAIL_BYTES {
-        &summary[summary.len() - SCAN_TAIL_BYTES..]
+        let start = summary.len() - SCAN_TAIL_BYTES;
+        // Find nearest valid UTF-8 char boundary to avoid panics on multi-byte chars.
+        let start = (start..summary.len())
+            .find(|&i| summary.is_char_boundary(i))
+            .unwrap_or(summary.len());
+        &summary[start..]
     } else {
         summary
     };
@@ -201,5 +206,15 @@ Review complete.
         assert_eq!(v.revised_plan.as_deref(), Some("Use async everywhere."));
         assert_eq!(v.what_changed, vec!["Switched to async", "Added retries"]);
         assert_eq!(v.why_changed, vec!["Performance", "Reliability"]);
+    }
+
+    #[test]
+    fn test_parse_verdict_with_unicode() {
+        let summary = format!(
+            "Проверка плана завершена. Всё выглядит хорошо. {} ```json\n{{\"verdict\": \"approved\", \"summary\": \"Всё ок\", \"issues\": []}}\n```",
+            "🎯".repeat(500)
+        );
+        let verdict = parse_verdict(&summary).unwrap();
+        assert_eq!(verdict.verdict, VerdictStatus::Approved);
     }
 }

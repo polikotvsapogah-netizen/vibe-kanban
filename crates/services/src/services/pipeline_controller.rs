@@ -27,7 +27,7 @@ pub enum TransitionAction {
         stage_id: String,
         role: String,
         agent: String,
-        session_id: Uuid,
+        session_id: Option<Uuid>,
         prompt_additions: Vec<String>,
         is_follow_up: bool,
     },
@@ -79,6 +79,19 @@ impl PipelineController {
         let mut role_sessions: HashMap<String, String> =
             serde_json::from_str(&state.role_sessions).context("Bad role_sessions JSON")?;
 
+        // 2b. Dedup check: skip if this execution was already processed.
+        let already_processed = stage_history.iter().any(|e| {
+            e.execution_process_id == ctx.execution_process.id.to_string()
+                && e.completed_at.is_some()
+        });
+        if already_processed {
+            tracing::warn!(
+                "Duplicate callback for execution {}, skipping",
+                ctx.execution_process.id
+            );
+            return Ok(TransitionAction::NoPipeline);
+        }
+
         // 3. Identify current stage config.
         let current_stage = config
             .stages
@@ -106,6 +119,7 @@ impl PipelineController {
             &mut handoff_artifacts,
             &mut role_sessions,
             ctx.session.id,
+            &stage_history,
         );
 
         // 7. Persist state changes.
@@ -217,6 +231,7 @@ impl PipelineController {
         handoff_artifacts: &mut HashMap<String, HandoffArtifact>,
         role_sessions: &mut HashMap<String, String>,
         session_id: Uuid,
+        stage_history: &[StageHistoryEntry],
     ) -> TransitionAction {
         let verdict = match verdict {
             Some(v) => v,
@@ -235,6 +250,7 @@ impl PipelineController {
                 handoff_artifacts,
                 role_sessions,
                 session_id,
+                stage_history,
             ),
             VerdictStatus::NeedsChanges => Self::handle_needs_changes(
                 config,
@@ -244,6 +260,7 @@ impl PipelineController {
                 handoff_artifacts,
                 role_sessions,
                 session_id,
+                stage_history,
             ),
             VerdictStatus::Failed => TransitionAction::Paused {
                 reason: format!("Stage {} failed: {}", current_stage.id, verdict.summary),
@@ -260,6 +277,7 @@ impl PipelineController {
         handoff_artifacts: &mut HashMap<String, HandoffArtifact>,
         role_sessions: &mut HashMap<String, String>,
         session_id: Uuid,
+        stage_history: &[StageHistoryEntry],
     ) -> TransitionAction {
         // "complete" means the pipeline is done.
         if current_stage.on_success == "complete" {
@@ -303,21 +321,27 @@ impl PipelineController {
         // Record the session for this role so follow-ups reuse it.
         role_sessions.insert(current_stage.role.clone(), session_id.to_string());
 
-        // Check if the next stage requires human approval.
+        // Check if the next stage requires human approval (only on first visit).
         if next_stage.approval == "approval" {
-            return TransitionAction::AwaitApproval {
-                stage_id: next_stage.id.clone(),
-            };
+            let already_visited = stage_history.iter().any(|e| e.stage_id == next_stage.id);
+            if !already_visited {
+                return TransitionAction::AwaitApproval {
+                    stage_id: next_stage.id.clone(),
+                };
+            }
         }
 
-        // Determine whether the next stage re-uses a session (follow-up).
-        let is_follow_up = role_sessions.contains_key(&next_stage.role);
+        // Look up the session for the target role (not the current stage's role).
+        let target_session = role_sessions
+            .get(&next_stage.role)
+            .and_then(|s| Uuid::parse_str(s).ok());
+        let is_follow_up = target_session.is_some();
 
         TransitionAction::StartStage {
             stage_id: next_stage.id.clone(),
             role: next_stage.role.clone(),
             agent: next_stage.agent.clone(),
-            session_id,
+            session_id: target_session,
             prompt_additions: Self::build_prompt_additions(handoff_artifacts, &next_stage.id),
             is_follow_up,
         }
@@ -331,7 +355,18 @@ impl PipelineController {
         handoff_artifacts: &mut HashMap<String, HandoffArtifact>,
         role_sessions: &mut HashMap<String, String>,
         session_id: Uuid,
+        stage_history: &[StageHistoryEntry],
     ) -> TransitionAction {
+        // Bug 1 fix: check for "pause" BEFORE any retry counter logic.
+        if current_stage.on_fail == "pause" {
+            return TransitionAction::Paused {
+                reason: format!(
+                    "Stage '{}' needs changes: {}",
+                    current_stage.id, verdict.summary
+                ),
+            };
+        }
+
         let max_retries = current_stage
             .max_retries
             .unwrap_or(config.default_max_retries);
@@ -366,14 +401,19 @@ impl PipelineController {
             };
             handoff_artifacts.insert(fail_stage.id.clone(), artifact);
 
-            let is_follow_up = role_sessions.contains_key(&fail_stage.role);
             role_sessions.insert(current_stage.role.clone(), session_id.to_string());
+
+            // Look up the session for the target role.
+            let target_session = role_sessions
+                .get(&fail_stage.role)
+                .and_then(|s| Uuid::parse_str(s).ok());
+            let is_follow_up = target_session.is_some();
 
             TransitionAction::StartStage {
                 stage_id: fail_stage.id.clone(),
                 role: fail_stage.role.clone(),
                 agent: fail_stage.agent.clone(),
-                session_id,
+                session_id: target_session,
                 prompt_additions: Self::build_prompt_additions(handoff_artifacts, &fail_stage.id),
                 is_follow_up,
             }
@@ -416,7 +456,7 @@ impl PipelineController {
                         stage_id: fail_stage.id.clone(),
                         role: fail_stage.role.clone(),
                         agent: escalate_agent.clone(),
-                        session_id,
+                        session_id: None, // escalation = fresh session
                         prompt_additions: Self::build_prompt_additions(
                             handoff_artifacts,
                             &fail_stage.id,
@@ -529,6 +569,7 @@ mod tests {
         let mut sessions = HashMap::new();
         let session_id = Uuid::new_v4();
 
+        let stage_history: Vec<StageHistoryEntry> = vec![];
         let action = PipelineController::determine_transition(
             &config,
             &review,
@@ -537,6 +578,7 @@ mod tests {
             &mut artifacts,
             &mut sessions,
             session_id,
+            &stage_history,
         );
 
         match action {
@@ -560,6 +602,7 @@ mod tests {
         let mut sessions = HashMap::new();
         let session_id = Uuid::new_v4();
 
+        let stage_history: Vec<StageHistoryEntry> = vec![];
         let action = PipelineController::determine_transition(
             &config,
             &review,
@@ -568,6 +611,7 @@ mod tests {
             &mut artifacts,
             &mut sessions,
             session_id,
+            &stage_history,
         );
 
         match action {
@@ -593,6 +637,7 @@ mod tests {
         let mut sessions = HashMap::new();
         let session_id = Uuid::new_v4();
 
+        let stage_history: Vec<StageHistoryEntry> = vec![];
         let action = PipelineController::determine_transition(
             &config,
             &review,
@@ -601,6 +646,7 @@ mod tests {
             &mut artifacts,
             &mut sessions,
             session_id,
+            &stage_history,
         );
 
         match action {
@@ -622,6 +668,7 @@ mod tests {
         let mut sessions = HashMap::new();
         let session_id = Uuid::new_v4();
 
+        let stage_history: Vec<StageHistoryEntry> = vec![];
         let action = PipelineController::determine_transition(
             &config,
             &review,
@@ -630,6 +677,7 @@ mod tests {
             &mut artifacts,
             &mut sessions,
             session_id,
+            &stage_history,
         );
 
         match action {
@@ -652,6 +700,7 @@ mod tests {
         let mut sessions = HashMap::new();
         let session_id = Uuid::new_v4();
 
+        let stage_history: Vec<StageHistoryEntry> = vec![];
         let action = PipelineController::determine_transition(
             &config,
             &review,
@@ -660,6 +709,7 @@ mod tests {
             &mut artifacts,
             &mut sessions,
             session_id,
+            &stage_history,
         );
 
         assert!(
@@ -678,6 +728,7 @@ mod tests {
             &mut artifacts,
             &mut sessions,
             session_id,
+            &stage_history,
         );
 
         assert!(
