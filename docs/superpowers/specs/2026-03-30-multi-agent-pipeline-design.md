@@ -69,7 +69,7 @@ Pipeline is described as a JSON config stored as a pipeline profile.
       "approval": "approval",
       "on_success": "builder",
       "on_fail": "planner",
-      "max_retries": 3
+      "max_retries": 7
     },
     {
       "id": "builder",
@@ -87,7 +87,8 @@ Pipeline is described as a JSON config stored as a pipeline profile.
       "approval": "auto",
       "on_success": "tester",
       "on_fail": "builder",
-      "max_retries": 3
+      "max_retries": 3,
+      "comment": "fix loops capped at 3, not 7"
     },
     {
       "id": "tester",
@@ -98,7 +99,8 @@ Pipeline is described as a JSON config stored as a pipeline profile.
       "on_fail": "code_reviewer",
       "escalate_agent": "codex",
       "escalate_after_retries": 3,
-      "max_retries": null
+      "max_retries": 3,
+      "comment": "test loops capped at 3, not 7"
     }
   ]
 }
@@ -119,7 +121,7 @@ Pipeline is described as a JSON config stored as a pipeline profile.
 | `mode` | Review mode (Plan Reviewer only). `consensus` — reviewer can rewrite and improve the plan, agents converge through negotiation. `strict` — reviewer only critiques, does not rewrite. See Plan Reviewer Modes below |
 | `on_success` | Which stage to run after successful completion. `complete` = pipeline finished |
 | `on_fail` | What happens on failure. Can point to a previous stage for rework or `pause` for user decision |
-| `max_retries` | Max retry count for this specific stage's correction cycle. `null` = use `default_max_retries` |
+| `max_retries` | Max retry count for this specific stage's correction cycle. `null` = use `default_max_retries`. **Retry policy:** planning loop (Planner ↔ Reviewer) = 7 (broad exploration). Fix/test loops (Code Reviewer ↔ Builder, Tester ↔ Code Reviewer) = 3 (focused corrections) |
 | `escalate_agent` | Second agent that takes over when primary fails after retries. Receives full context: plan, code, and errors |
 | `escalate_after_retries` | How many failed attempts before escalating to the second agent |
 
@@ -287,6 +289,15 @@ Not an approval gate — this is the verdict from the completed stage, stored se
 
 UI shows [Approve] [Reject] buttons when `awaiting_approval = true`.
 
+### Approval on Cyclic Stages
+
+When a stage with `approval: "approval"` is part of a retry cycle (e.g., Reviewer in Planner ↔ Reviewer loop):
+
+- **First entry** into the stage: approval required (user reviews handoff)
+- **Subsequent entries** (retry rounds): approval is **skipped** — loop runs automatically until verdict is `approved` or max_retries reached
+
+This prevents the planning loop from blocking on manual approval every round. If the user wants to intervene mid-loop, they can use the `POST /api/workspaces/:id/pipeline/pause` endpoint.
+
 ## Pipeline State Storage
 
 ### Two-level storage
@@ -450,8 +461,6 @@ Pipeline settings appear in the task creation form, next to agent selection:
 │                                                │
 │  ☐ Second agent: [Codex ▾] after [3] attempts │
 │  ☑ Create PR after completion               (?)│
-│                                                │
-│  [+ Add stage]  [🗑 Remove stage]              │
 └────────────────────────────────────────────────┘
 ```
 
@@ -504,6 +513,20 @@ Uses existing Vibe Kanban auto-move mechanisms:
 - If `auto_create_pr` enabled + single-repo + valid auth → PR created automatically → card moves to **In Review**
 - If conditions not met → card stays in **In Progress** with `pipeline_states.status = ready_for_pr`, user creates PR manually
 - **In Review → Done**: PR merge (already exists)
+
+## Notifications
+
+Pipeline events that require user attention use the existing notification system (`notification.rs`, `executor_approvals.rs`).
+
+| Event | Notification | Action |
+|-------|-------------|--------|
+| `awaiting_approval` | Push notification + dashboard badge | Click → opens workspace with approval buttons |
+| `paused` (max retries reached) | Push notification: "Pipeline paused: {stage} failed after {N} attempts" | Click → opens workspace with stage logs |
+| `ready_for_pr` | Push notification: "Pipeline complete, ready for PR" | Click → opens workspace with PR creation |
+| `escalation_started` | Push notification: "Escalated to {agent}: {reason}" | Click → opens workspace |
+| `pipeline_completed` | Push notification: "Pipeline finished successfully" | Click → opens workspace |
+
+No new notification infrastructure needed — reuse existing `NotificationService` and approval notification patterns.
 
 ## Key Files to Modify
 
