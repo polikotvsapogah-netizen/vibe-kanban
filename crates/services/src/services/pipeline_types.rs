@@ -65,9 +65,13 @@ pub struct Verdict {
     #[serde(default)]
     pub blockers: Vec<String>,
     #[serde(default)]
+    pub non_blockers: Vec<String>,
+    #[serde(default)]
     pub missing_steps: Vec<String>,
     #[serde(default)]
     pub risks: Vec<String>,
+    #[serde(default)]
+    pub suggested_fixes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

@@ -21,7 +21,7 @@ use crate::{
 };
 
 use db::models::pipeline_state::{CreatePipelineState, PipelineState};
-use services::services::pipeline_types::PipelineConfig;
+use services::services::{pipeline_prompts, pipeline_types::PipelineConfig};
 
 pub(crate) async fn create_workspace_record(
     deployment: &DeploymentImpl,
@@ -299,12 +299,9 @@ pub async fn create_and_start_workspace(
     let workspace = managed_workspace.workspace.clone();
     tracing::info!("Created workspace {}", workspace.id);
 
-    let execution_process = deployment
-        .container()
-        .start_workspace(&workspace, executor_config.clone(), workspace_prompt)
-        .await?;
-
     // ── Pipeline initialisation (opt-in) ──────────────────────────
+    // Must happen BEFORE starting workspace so the first stage gets
+    // the correct stage prompt and verdict instruction.
     if let Some(ref config_json) = pipeline_config {
         // Validate that the JSON is a valid PipelineConfig with at least one stage.
         let config: PipelineConfig =
@@ -318,7 +315,18 @@ pub async fn create_and_start_workspace(
             ));
         }
 
-        let first_stage_id = config.stages[0].id.clone();
+        let first_stage = &config.stages[0];
+        let first_stage_id = first_stage.id.clone();
+
+        // Prepend the first stage's role prompt (including verdict instruction)
+        // to the workspace prompt so the first execution runs within the pipeline.
+        let stage_prompt = pipeline_prompts::get_stage_prompt(
+            &first_stage.role,
+            first_stage.workflow_profile.as_deref(),
+            first_stage.workflow_mode.as_deref(),
+            &first_stage.policies,
+        );
+        workspace_prompt = format!("{}\n\n{}", stage_prompt, workspace_prompt);
 
         PipelineState::create(
             &deployment.db().pool,
@@ -341,6 +349,11 @@ pub async fn create_and_start_workspace(
             config.stages.len()
         );
     }
+
+    let execution_process = deployment
+        .container()
+        .start_workspace(&workspace, executor_config.clone(), workspace_prompt)
+        .await?;
 
     deployment
         .track_if_analytics_allowed(

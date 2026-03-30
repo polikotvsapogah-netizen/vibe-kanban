@@ -547,8 +547,10 @@ mod tests {
             why_changed: vec![],
             unresolved_issues: vec![],
             blockers: vec![],
+            non_blockers: vec![],
             missing_steps: vec![],
             risks: vec![],
+            suggested_fixes: vec![],
         }
     }
 

@@ -101,9 +101,17 @@ pub async fn start_pipeline_stage(
         .find(|s| s.id == stage_id)
         .ok_or_else(|| PipelineExecutorError::StageNotFound(stage_id.to_string()))?;
 
+    // If this is a follow-up for a builder role (e.g., returning from code review),
+    // override workflow_profile to "receiving-code-review" for the fix-loop prompt.
+    let effective_profile = if is_follow_up && role == "builder" {
+        Some("receiving-code-review")
+    } else {
+        stage_config.workflow_profile.as_deref()
+    };
+
     let role_prompt = pipeline_prompts::get_stage_prompt(
         role,
-        stage_config.workflow_profile.as_deref(),
+        effective_profile,
         stage_config.workflow_mode.as_deref(),
         &stage_config.policies,
     );

@@ -647,33 +647,39 @@ impl LocalContainerService {
                                                 started.execution_process_id,
                                                 started.session_id
                                             );
-                                            // Update role_sessions in pipeline_state
-                                            let mut role_sessions: std::collections::HashMap<
-                                                String,
-                                                String,
-                                            > = serde_json::from_str(&pipeline_state.role_sessions)
-                                                .unwrap_or_default();
-                                            role_sessions.insert(
-                                                role.clone(),
-                                                started.session_id.to_string(),
-                                            );
-                                            if let Err(e) = PipelineState::update_stage(
-                                                &db.pool,
-                                                ctx.workspace.id,
-                                                &stage_id,
-                                                "running",
-                                                &pipeline_state.retry_counts,
-                                                &pipeline_state.stage_history,
-                                                &pipeline_state.handoff_artifacts,
-                                                &serde_json::to_string(&role_sessions)
-                                                    .unwrap_or_default(),
-                                            )
-                                            .await
+                                            // Re-read fresh state from DB (controller already updated
+                                            // retry_counts, stage_history, handoff_artifacts, current_stage_id)
+                                            // — only merge the new role_sessions to avoid overwriting with stale data.
+                                            if let Ok(Some(fresh_state)) =
+                                                PipelineState::find_by_workspace_id(&db.pool, ctx.workspace.id).await
                                             {
-                                                tracing::error!(
-                                                    "Failed to update pipeline role_sessions: {}",
-                                                    e
+                                                let mut role_sessions: std::collections::HashMap<
+                                                    String,
+                                                    String,
+                                                > = serde_json::from_str(&fresh_state.role_sessions)
+                                                    .unwrap_or_default();
+                                                role_sessions.insert(
+                                                    role.clone(),
+                                                    started.session_id.to_string(),
                                                 );
+                                                if let Err(e) = PipelineState::update_stage(
+                                                    &db.pool,
+                                                    ctx.workspace.id,
+                                                    &fresh_state.current_stage_id,
+                                                    &fresh_state.status,
+                                                    &fresh_state.retry_counts,
+                                                    &fresh_state.stage_history,
+                                                    &fresh_state.handoff_artifacts,
+                                                    &serde_json::to_string(&role_sessions)
+                                                        .unwrap_or_default(),
+                                                )
+                                                .await
+                                                {
+                                                    tracing::error!(
+                                                        "Failed to update pipeline role_sessions: {}",
+                                                        e
+                                                    );
+                                                }
                                             }
                                         }
                                         Err(e) => {

@@ -4,14 +4,25 @@ Output the plan in structured markdown.";
 
 const REVIEWER_CONSENSUS_PROMPT: &str = "You are a plan review agent in consensus mode. You may \
 rewrite and improve the plan. Return your improved version along with what you changed and why. \
-If the plan is good as-is, approve it.";
+If the plan is good as-is, approve it. Your verdict JSON must include: verdict, summary, \
+revised_plan (the full improved plan text if you changed it), what_changed (list of changes), \
+why_changed (reasoning for each change), unresolved_issues (remaining concerns), and issues \
+(list of {file, line, description} objects for specific code-level concerns).";
 
 const REVIEWER_STRICT_PROMPT: &str = "You are a plan review agent in strict mode. Critique the \
 plan but do not rewrite it. List blockers, missing steps, risks, and suggested fixes. If the \
-plan is good, approve it.";
+plan is good, approve it. Your verdict JSON must include: verdict, summary, blockers \
+(blocking issues that must be fixed), non_blockers (minor issues that should be addressed), \
+missing_steps (steps the plan is missing), risks (potential risks), suggested_fixes \
+(concrete fix suggestions), and issues (list of {file, line, description} objects).";
 
 const BUILDER_PROMPT: &str = "You are an implementation agent. Write code following the approved \
 plan exactly. Implement each step from the plan. Focus on correctness and tests.";
+
+const BUILDER_FIX_PROMPT: &str = "You are an implementation agent in fix mode. You are receiving \
+code review feedback. Address each issue raised by the reviewer. Fix bugs, logic errors, and \
+missing error handling. Do not deviate from the original plan unless the reviewer specifically \
+requests a change. Focus on the specific issues listed.";
 
 const CODE_REVIEWER_PROMPT: &str = "You are a code review agent. Review all code changes made by \
 the builder. Check for bugs, logic errors, deviations from the plan, missing error handling, and \
@@ -20,6 +31,9 @@ security issues. List issues with file paths and line numbers.";
 const TESTER_PROMPT: &str = "You are a testing agent. Based on the task description, plan, and \
 implementation: 1) Create a test plan covering key scenarios, 2) Write the tests, 3) Run the \
 tests and report results.";
+
+const DEFAULT_PROMPT: &str = "You are a pipeline agent. Complete the assigned task carefully and \
+report your results.";
 
 const VERDICT_INSTRUCTION: &str = "\n\nIMPORTANT: End your response with a verdict block:\n\
 ```json\n\
@@ -46,23 +60,33 @@ fn policy_instruction(policy: &str) -> Option<&'static str> {
 
 pub fn get_stage_prompt(
     role: &str,
-    _workflow_profile: Option<&str>,
+    workflow_profile: Option<&str>,
     workflow_mode: Option<&str>,
     policies: &[String],
 ) -> String {
-    let base = match role {
-        "planner" => PLANNER_PROMPT,
-        "reviewer" => {
-            if workflow_mode == Some("strict") {
-                REVIEWER_STRICT_PROMPT
-            } else {
-                REVIEWER_CONSENSUS_PROMPT
+    let base = match workflow_profile.unwrap_or(role) {
+        "brainstorming" => match workflow_mode.unwrap_or("consensus") {
+            "strict" => REVIEWER_STRICT_PROMPT,
+            _ => REVIEWER_CONSENSUS_PROMPT,
+        },
+        "executing-plans" => BUILDER_PROMPT,
+        "requesting-code-review" => CODE_REVIEWER_PROMPT,
+        "receiving-code-review" => BUILDER_FIX_PROMPT,
+        "verification-before-completion" => TESTER_PROMPT,
+        _ => match role {
+            "planner" => PLANNER_PROMPT,
+            "reviewer" => {
+                if workflow_mode == Some("strict") {
+                    REVIEWER_STRICT_PROMPT
+                } else {
+                    REVIEWER_CONSENSUS_PROMPT
+                }
             }
-        }
-        "builder" => BUILDER_PROMPT,
-        "code_reviewer" => CODE_REVIEWER_PROMPT,
-        "tester" => TESTER_PROMPT,
-        _ => PLANNER_PROMPT,
+            "builder" => BUILDER_PROMPT,
+            "code_reviewer" => CODE_REVIEWER_PROMPT,
+            "tester" => TESTER_PROMPT,
+            _ => DEFAULT_PROMPT,
+        },
     };
 
     let mut prompt = base.to_string();
@@ -126,8 +150,26 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_role_falls_back_to_planner() {
+    fn test_unknown_role_falls_back_to_default() {
         let prompt = get_stage_prompt("unknown_role", None, None, &[]);
-        assert!(prompt.contains("planning agent"));
+        assert!(prompt.contains("pipeline agent"));
+    }
+
+    #[test]
+    fn test_workflow_profile_brainstorming() {
+        let prompt = get_stage_prompt("builder", Some("brainstorming"), None, &[]);
+        assert!(prompt.contains("consensus mode"));
+    }
+
+    #[test]
+    fn test_workflow_profile_brainstorming_strict() {
+        let prompt = get_stage_prompt("builder", Some("brainstorming"), Some("strict"), &[]);
+        assert!(prompt.contains("strict mode"));
+    }
+
+    #[test]
+    fn test_workflow_profile_receiving_code_review() {
+        let prompt = get_stage_prompt("builder", Some("receiving-code-review"), None, &[]);
+        assert!(prompt.contains("fix mode"));
     }
 }

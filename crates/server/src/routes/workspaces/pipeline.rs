@@ -45,10 +45,12 @@ fn build_status_response(
     state: &PipelineState,
     config: &PipelineConfig,
 ) -> PipelineStatusResponse {
+    // 1-based index for display consistency
     let current_stage_index = config
         .stages
         .iter()
         .position(|s| s.id == state.current_stage_id)
+        .map(|i| i + 1)
         .unwrap_or(0);
 
     PipelineStatusResponse {
@@ -139,18 +141,64 @@ pub async fn approve_pipeline(
         .and_then(|s| Uuid::parse_str(s).ok());
     let is_follow_up = session_id.is_some();
 
-    // Build prompt additions from handoff artifacts.
+    // Build prompt additions from handoff artifacts — pass ALL fields, not just review_summary.
     let handoff_artifacts: HashMap<String, serde_json::Value> =
         serde_json::from_str(&state.handoff_artifacts).unwrap_or_default();
     let mut prompt_additions = Vec::new();
     if let Some(artifact) = handoff_artifacts.get(&stage_id) {
+        if let Some(plan) = artifact.get("final_plan").and_then(|v| v.as_str()) {
+            prompt_additions.push(format!("Approved plan:\n{}", plan));
+        }
         if let Some(summary) = artifact.get("review_summary").and_then(|v| v.as_str()) {
-            prompt_additions.push(format!("Previous review summary: {}", summary));
+            prompt_additions.push(format!("Review summary: {}", summary));
+        }
+        if let Some(constraints) = artifact.get("constraints").and_then(|v| v.as_array()) {
+            let items: Vec<&str> = constraints.iter().filter_map(|c| c.as_str()).collect();
+            if !items.is_empty() {
+                prompt_additions.push(format!("Constraints:\n- {}", items.join("\n- ")));
+            }
+        }
+        if let Some(criteria) = artifact.get("acceptance_criteria").and_then(|v| v.as_array()) {
+            let items: Vec<&str> = criteria.iter().filter_map(|c| c.as_str()).collect();
+            if !items.is_empty() {
+                prompt_additions.push(format!("Acceptance criteria:\n- {}", items.join("\n- ")));
+            }
+        }
+        if let Some(risks) = artifact.get("risks").and_then(|v| v.as_array()) {
+            let items: Vec<&str> = risks.iter().filter_map(|c| c.as_str()).collect();
+            if !items.is_empty() {
+                prompt_additions.push(format!("Known risks:\n- {}", items.join("\n- ")));
+            }
+        }
+        if let Some(issues) = artifact.get("issues").and_then(|v| v.as_array()) {
+            if !issues.is_empty() {
+                let formatted: Vec<String> = issues
+                    .iter()
+                    .filter_map(|i| {
+                        let desc = i.get("description").and_then(|d| d.as_str())?;
+                        let file = i.get("file").and_then(|f| f.as_str()).unwrap_or("");
+                        let line = i.get("line").and_then(|l| l.as_u64());
+                        if file.is_empty() {
+                            Some(format!("- {}", desc))
+                        } else if let Some(l) = line {
+                            Some(format!("- {}:{}: {}", file, l, desc))
+                        } else {
+                            Some(format!("- {}: {}", file, desc))
+                        }
+                    })
+                    .collect();
+                if !formatted.is_empty() {
+                    prompt_additions.push(format!("Outstanding issues:\n{}", formatted.join("\n")));
+                }
+            }
+        }
+        if let Some(report) = artifact.get("test_report").and_then(|v| v.as_str()) {
+            prompt_additions.push(format!("Test report:\n{}", report));
         }
     }
 
     // Start the approved stage.
-    let _started = pipeline_executor::start_pipeline_stage(
+    let _started = match pipeline_executor::start_pipeline_stage(
         deployment.container(),
         pool,
         &workspace,
@@ -163,10 +211,18 @@ pub async fn approve_pipeline(
         is_follow_up,
     )
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to start approved pipeline stage: {}", e);
-        ApiError::BadRequest(format!("Failed to start pipeline stage: {}", e))
-    })?;
+    {
+        Ok(started) => started,
+        Err(e) => {
+            tracing::error!("Failed to start approved pipeline stage: {}", e);
+            // Rollback: set pipeline back to paused since clear_approval set it to running
+            let _ = PipelineState::set_status(pool, workspace.id, "paused").await;
+            return Err(ApiError::BadRequest(format!(
+                "Failed to start pipeline stage: {}",
+                e
+            )));
+        }
+    };
 
     // Update role_sessions with the new session.
     let mut role_sessions_updated = role_sessions;
@@ -231,19 +287,38 @@ pub async fn reject_pipeline(
         ApiError::BadRequest("Invalid pipeline configuration".to_string())
     })?;
 
-    // Find the current stage to determine on_fail target.
-    let current_stage = config
+    // Use approval_stage_id to find the stage that was about to be approved.
+    // The rejection should go to the stage that PRODUCED the output being rejected,
+    // which is the stage before approval_stage_id. Find it by looking at which stage
+    // has on_success == approval_stage_id, then use that stage's on_fail for routing.
+    let approval_stage_id = state
+        .approval_stage_id
+        .clone()
+        .unwrap_or_else(|| state.current_stage_id.clone());
+
+    // Find the producer stage: the one whose on_success points to the approval stage.
+    let producer_stage = config
         .stages
         .iter()
-        .find(|s| s.id == state.current_stage_id)
-        .ok_or_else(|| {
-            ApiError::BadRequest(format!(
-                "Current stage '{}' not found in pipeline config",
-                state.current_stage_id
-            ))
-        })?;
+        .find(|s| s.on_success == approval_stage_id);
 
-    let fail_stage_id = &current_stage.on_fail;
+    // Use the producer's on_fail if found, otherwise fall back to the approval stage's on_fail.
+    let fail_stage_id = if let Some(producer) = producer_stage {
+        &producer.on_fail
+    } else {
+        let approval_stage = config
+            .stages
+            .iter()
+            .find(|s| s.id == approval_stage_id)
+            .ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "Approval stage '{}' not found in pipeline config",
+                    approval_stage_id
+                ))
+            })?;
+        &approval_stage.on_fail
+    };
+
     let fail_stage = config
         .stages
         .iter()
@@ -263,10 +338,22 @@ pub async fn reject_pipeline(
             ApiError::BadRequest("Failed to clear approval".to_string())
         })?;
 
-    // Build prompt additions including rejection feedback.
+    // Build prompt additions including rejection feedback AND existing handoff context.
     let mut prompt_additions = Vec::new();
     if let Some(ref feedback) = payload.feedback {
-        prompt_additions.push(format!("Human reviewer feedback: {}", feedback));
+        prompt_additions.push(format!("Human reviewer feedback (rejection): {}", feedback));
+    }
+
+    // Include any existing handoff context for the target stage.
+    let handoff_artifacts: HashMap<String, serde_json::Value> =
+        serde_json::from_str(&state.handoff_artifacts).unwrap_or_default();
+    if let Some(artifact) = handoff_artifacts.get(&fail_stage.id) {
+        if let Some(plan) = artifact.get("final_plan").and_then(|v| v.as_str()) {
+            prompt_additions.push(format!("Previous plan:\n{}", plan));
+        }
+        if let Some(summary) = artifact.get("review_summary").and_then(|v| v.as_str()) {
+            prompt_additions.push(format!("Previous review summary: {}", summary));
+        }
     }
 
     // Look up existing session for the fail stage's role.

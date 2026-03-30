@@ -207,13 +207,15 @@ pub async fn get_workspace_summaries(
                             counts.get(&ps.current_stage_id).copied().unwrap_or(0);
                         if current_retry > 0 {
                             // Find max_retries for this stage.
+                            // Format: "current/max" where current is 1-based attempt number
+                            // and max is max_retries (the maximum number of retry attempts).
                             let max_retries = cfg
                                 .stages
                                 .iter()
                                 .find(|s| s.id == ps.current_stage_id)
                                 .and_then(|s| s.max_retries)
                                 .unwrap_or(cfg.default_max_retries);
-                            Some(format!("{}/{}", current_retry + 1, max_retries + 1))
+                            Some(format!("{}/{}", current_retry, max_retries))
                         } else {
                             None
                         }
