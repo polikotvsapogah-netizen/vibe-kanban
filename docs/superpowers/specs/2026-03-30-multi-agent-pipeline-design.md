@@ -130,7 +130,6 @@ Pipeline is described as a JSON config stored as a pipeline profile.
 | `role` | Stage role — determines the task the agent performs (planning, review, coding, testing) |
 | `agent` | Which AI agent executes this stage (claude_code, codex, gemini, etc.) |
 | `approval` | Whether user confirmation is required before this stage starts. `auto` — starts automatically, `approval` — waits for user OK |
-| `mode` | **Deprecated in favor of `workflow_mode`.** Kept for backward compat. See Plan Reviewer Modes below |
 | `on_success` | Which stage to run after successful completion. `complete` = pipeline finished |
 | `on_fail` | What happens on failure. Can point to a previous stage for rework or `pause` for user decision |
 | `max_retries` | Max retry count for this specific stage's correction cycle. `null` = use `default_max_retries`. **Retry policy:** planning loop (Planner ↔ Reviewer) = 7 (broad exploration). Fix/test loops (Code Reviewer ↔ Builder, Tester ↔ Code Reviewer) = 3 (focused corrections) |
@@ -148,8 +147,10 @@ Behavioral layer on top of the pipeline engine. Maps superpowers skills to pipel
 
 ### Profile Registry
 
-| Profile | Based on Skill | Best for |
-|---------|---------------|----------|
+Profiles are **internal versioned prompt-pack IDs** bundled with the pipeline engine. They are inspired by superpowers skills but do not depend on external skill files at runtime. If superpowers plugin is available, profiles can optionally load enhanced prompt content from it — but the pipeline works without it.
+
+| Profile | Inspired by | Best for |
+|---------|------------|----------|
 | `brainstorming` | superpowers:brainstorming | Planner, Reviewer (consensus mode) |
 | `writing-plans` | superpowers:writing-plans | Planner (detailed implementation plans) |
 | `executing-plans` | superpowers:executing-plans | Builder (task-by-task execution) |
@@ -159,6 +160,8 @@ Behavioral layer on top of the pipeline engine. Maps superpowers skills to pipel
 | `systematic-debugging` | superpowers:systematic-debugging | Builder fix loop (root cause analysis) |
 | `verification-before-completion` | superpowers:verification-before-completion | Tester |
 | `finishing-a-development-branch` | superpowers:finishing-a-development-branch | Pipeline completion (PR creation) |
+
+Each profile is a hardcoded prompt template in `pipeline_controller`. No external file dependency.
 
 ### Default Stage Profiles
 
@@ -186,12 +189,24 @@ Behavioral layer on top of the pipeline engine. Maps superpowers skills to pipel
 ### How Controller Uses Profiles
 
 1. Controller reads `workflow_profile` from stage config
-2. Looks up the corresponding prompt template from profile registry
-3. Applies `workflow_mode` modifiers (consensus/strict, batched/direct)
-4. Appends `policies` as additional prompt instructions
-5. Injects the composed prompt via executor's `append_prompt`
+2. Checks for **runtime profile overrides** (see below)
+3. Looks up the corresponding prompt template from internal registry
+4. Applies `workflow_mode` modifiers (consensus/strict, batched/direct)
+5. Appends `policies` as additional prompt instructions
+6. Injects the composed prompt via executor's `append_prompt`
 
 Controller never interprets skill logic — it just composes the prompt and enforces the verdict/handoff contract.
+
+### Runtime Profile Overrides
+
+Some transitions temporarily override the stage's default profile:
+
+| Transition | Override |
+|-----------|----------|
+| Code Reviewer → Builder (fix) | `workflow_profile` changes from `executing-plans` to `receiving-code-review`, adds `require_root_cause` policy |
+| Tester → Code Reviewer → Builder (fix) | Same override as above, plus test failure context in handoff |
+
+Override is applied by controller based on the **source of the transition** (which stage triggered the retry). The stage config itself is not modified — the override is ephemeral for that execution only.
 
 ## Plan Reviewer Modes
 
