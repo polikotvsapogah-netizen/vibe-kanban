@@ -196,14 +196,39 @@ function isReviewerStage(stageId: string): boolean {
 
 // ---------- Helper: Info tooltip ----------
 
-function InfoTooltip({ text }: { text: string }) {
+// Russian tooltips — always shown regardless of UI language
+const RU_TOOLTIPS: Record<string, string> = {
+  pipeline:
+    'Включить многоэтапный пайплайн. Задача проходит через несколько AI-агентов: планирование, ревью, написание кода, тестирование',
+  planner: 'Создаёт детальный план реализации на основе описания задачи',
+  reviewer:
+    'Проверяет план на качество и полноту. Возвращает на доработку при обнаружении проблем',
+  builder:
+    'Пишет код по утверждённому плану. Также исправляет баги, найденные при код-ревью',
+  codeReview:
+    'Проверяет написанный код на баги, ошибки и соответствие плану',
+  tester:
+    'Планирует тесты на основе спецификации и архитектуры, пишет и запускает их',
+  finisher:
+    'Проверяет прохождение всех тестов, подготавливает ветку к мержу, создаёт Pull Request',
+  consensus:
+    'Ревьюер может переписать и улучшить план. Агенты согласовывают за несколько раундов',
+  strict: 'Ревьюер только критикует, не переписывает план',
+  secondAgent:
+    'Когда основной агент не справляется после повторных попыток, задача передаётся второму агенту с полным контекстом',
+  createPr:
+    'После прохождения всех этапов автоматически создать Pull Request',
+};
+
+function InfoTooltip({ text, ruKey }: { text: string; ruKey?: string }) {
+  const tooltip = ruKey ? RU_TOOLTIPS[ruKey] || text : text;
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <InfoIcon className="inline-block h-3.5 w-3.5 text-muted-foreground cursor-help ml-1 shrink-0" />
+        <InfoIcon className="inline-block h-3.5 w-3.5 text-green-500 cursor-help ml-1 shrink-0" />
       </TooltipTrigger>
-      <TooltipContent className="max-w-[260px]">
-        <p className="text-xs">{text}</p>
+      <TooltipContent className="max-w-[280px]">
+        <p className="text-xs">{tooltip}</p>
       </TooltipContent>
     </Tooltip>
   );
@@ -255,7 +280,7 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
           >
             {t('toggle')}
           </label>
-          <InfoTooltip text={t('tooltips.pipeline')} />
+          <InfoTooltip text={t('tooltips.pipeline')} ruKey="pipeline" />
         </div>
 
         {enabled && (
@@ -317,7 +342,7 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
                             <span className="text-normal font-medium">
                               {t(`stages.${i18nKey}`)}
                             </span>
-                            <InfoTooltip text={t(`tooltips.${i18nKey}`)} />
+                            <InfoTooltip text={t(`tooltips.${i18nKey}`)} ruKey={i18nKey} />
                           </div>
                         </td>
 
@@ -388,12 +413,14 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
                                       {t('consensus')}
                                       <InfoTooltip
                                         text={t('tooltips.consensus')}
+                                        ruKey="consensus"
                                       />
                                     </SelectItem>
                                     <SelectItem value="strict">
                                       {t('strict')}
                                       <InfoTooltip
                                         text={t('tooltips.strict')}
+                                        ruKey="strict"
                                       />
                                     </SelectItem>
                                   </SelectContent>
@@ -423,7 +450,7 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
               >
                 {t('secondAgent')}
               </label>
-              <InfoTooltip text={t('tooltips.secondAgent')} />
+              <InfoTooltip text={t('tooltips.secondAgent')} ruKey="secondAgent" />
             </div>
             {config.enable_second_agent && (
               <div className="flex items-center gap-half pl-5 pb-half">
@@ -493,7 +520,7 @@ export function PipelineSettings({ value, onChange }: PipelineSettingsProps) {
               >
                 {t('createPr')}
               </label>
-              <InfoTooltip text={t('tooltips.createPr')} />
+              <InfoTooltip text={t('tooltips.createPr')} ruKey="createPr" />
             </div>
           </div>
         )}
