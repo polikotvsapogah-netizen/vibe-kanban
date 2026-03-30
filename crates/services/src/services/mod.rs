@@ -15,6 +15,7 @@ pub mod migration;
 pub mod notification;
 pub mod oauth_credentials;
 pub mod pipeline_controller;
+pub mod pipeline_prompts;
 pub mod pipeline_types;
 pub mod pr_monitor;
 
