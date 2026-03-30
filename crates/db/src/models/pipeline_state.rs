@@ -228,6 +228,25 @@ impl PipelineState {
         Ok(())
     }
 
+    pub async fn find_by_workspace_ids(
+        pool: &SqlitePool,
+        workspace_ids: &[Uuid],
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        if workspace_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // SQLx doesn't support dynamic IN lists with compile-time checking,
+        // so we query individually and collect.
+        let mut results = Vec::with_capacity(workspace_ids.len());
+        for id in workspace_ids {
+            if let Some(state) = Self::find_by_workspace_id(pool, *id).await? {
+                results.push(state);
+            }
+        }
+        Ok(results)
+    }
+
     pub async fn delete_by_workspace_id(
         pool: &SqlitePool,
         workspace_id: Uuid,
