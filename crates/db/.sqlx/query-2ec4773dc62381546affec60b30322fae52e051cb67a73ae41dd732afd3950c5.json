@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pipeline_states SET\n                awaiting_approval = 0,\n                approval_stage_id = NULL,\n                approval_payload = NULL,\n                status = 'running',\n                updated_at = datetime('now', 'subsec')\n               WHERE workspace_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "2ec4773dc62381546affec60b30322fae52e051cb67a73ae41dd732afd3950c5"
+}
