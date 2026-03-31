@@ -1,33 +1,22 @@
 use crate::services::pipeline_types::Verdict;
 
-const SCAN_TAIL_BYTES: usize = 1024;
-
-/// Parse a `Verdict` from the tail of an agent summary.
+/// Parse a `Verdict` from an agent summary.
 ///
 /// Tries, in order:
 /// 1. JSON fenced code blocks (` ```json … ``` `)
 /// 2. Raw JSON objects that contain a `"verdict"` key
 pub fn parse_verdict(summary: &str) -> Option<Verdict> {
-    let tail = if summary.len() > SCAN_TAIL_BYTES {
-        let start = summary.len() - SCAN_TAIL_BYTES;
-        // Find nearest valid UTF-8 char boundary to avoid panics on multi-byte chars.
-        let start = (start..summary.len())
-            .find(|&i| summary.is_char_boundary(i))
-            .unwrap_or(summary.len());
-        &summary[start..]
-    } else {
-        summary
-    };
-
     // 1. Try fenced code blocks first — most reliable signal.
-    for block in extract_json_code_blocks(tail) {
+    // Search from the end because the pipeline contract requires the verdict block
+    // to be the final structured JSON in the response.
+    for block in extract_json_code_blocks(summary).into_iter().rev() {
         if let Some(v) = try_parse_verdict_json(block) {
             return Some(v);
         }
     }
 
     // 2. Fall back to scanning for a raw JSON object.
-    try_find_raw_verdict_json(tail)
+    try_find_raw_verdict_json(summary)
 }
 
 /// Return slices of text that appear inside ` ```json … ``` ` fences.
@@ -65,9 +54,7 @@ fn try_parse_verdict_json(json_str: &str) -> Option<Verdict> {
 /// Scan `text` for a `{` that begins a JSON object containing `"verdict"`,
 /// then try to parse the balanced object.
 fn try_find_raw_verdict_json(text: &str) -> Option<Verdict> {
-    let mut search_from = 0;
-    while let Some(brace_pos) = text[search_from..].find('{') {
-        let abs_brace = search_from + brace_pos;
+    for (abs_brace, _) in text.rmatch_indices('{') {
         let candidate = &text[abs_brace..];
 
         // Quick check: the object must contain the key "verdict".
@@ -79,8 +66,6 @@ fn try_find_raw_verdict_json(text: &str) -> Option<Verdict> {
                 }
             }
         }
-
-        search_from = abs_brace + 1;
     }
     None
 }
@@ -186,6 +171,19 @@ Review complete.
         let summary = format!("{}{}", padding, verdict_block);
         let v = parse_verdict(&summary).expect("should find verdict in tail");
         assert_eq!(v.verdict, VerdictStatus::Approved);
+    }
+
+    #[test]
+    fn test_parse_verdict_with_large_revised_plan_block() {
+        let revised_plan = "Step 1: investigate.\n".repeat(180);
+        let summary = format!(
+            "Planner notes before verdict.\n```json\n{{\n  \"verdict\": \"approved\",\n  \"summary\": \"Plan prepared.\",\n  \"issues\": [],\n  \"revised_plan\": {revised_plan:?}\n}}\n```"
+        );
+
+        let verdict = parse_verdict(&summary).expect("should parse large verdict block");
+        assert_eq!(verdict.verdict, VerdictStatus::Approved);
+        assert_eq!(verdict.summary, "Plan prepared.");
+        assert_eq!(verdict.revised_plan.as_deref(), Some(revised_plan.as_str()));
     }
 
     #[test]

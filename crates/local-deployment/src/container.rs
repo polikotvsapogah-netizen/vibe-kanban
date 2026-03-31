@@ -101,6 +101,19 @@ impl LocalContainerService {
             return trimmed.to_string();
         }
 
+        if let Some(verdict_block) = extract_terminal_json_block(trimmed) {
+            let available_prefix_budget = MAX_SUMMARY_LENGTH
+                .saturating_sub(verdict_block.len())
+                .saturating_sub(SUMMARY_MIDDLE_TRUNCATION.len());
+
+            if available_prefix_budget == 0 {
+                return verdict_block.to_string();
+            }
+
+            let prefix = truncate_to_char_boundary(trimmed, available_prefix_budget);
+            return format!("{prefix}{SUMMARY_MIDDLE_TRUNCATION}{verdict_block}");
+        }
+
         let suffix_budget = MAX_SUMMARY_LENGTH / 2;
         let prefix_budget = MAX_SUMMARY_LENGTH
             .saturating_sub(suffix_budget)
@@ -1405,6 +1418,15 @@ impl LocalContainerService {
     }
 }
 
+fn extract_terminal_json_block(text: &str) -> Option<&str> {
+    let start = text.rfind("```json")?;
+    let after_start = &text[start..];
+    let body = after_start.strip_prefix("```json")?;
+    let end_offset = body.find("```")?;
+    let end = start + "```json".len() + end_offset + "```".len();
+    Some(text[start..end].trim())
+}
+
 fn failure_exit_status() -> std::process::ExitStatus {
     #[cfg(unix)]
     {
@@ -2033,6 +2055,22 @@ mod tests {
         let verdict = parse_verdict(&summary).expect("truncated summary should keep verdict");
         assert_eq!(verdict.verdict, VerdictStatus::Approved);
         assert_eq!(verdict.summary, "Planner accepted.");
+    }
+
+    #[test]
+    fn summarize_assistant_message_preserves_large_verdict_block() {
+        let prefix = "Implementation notes.\n".repeat(250);
+        let revised_plan = "Step: validate pipeline transition.\n".repeat(180);
+        let verdict_block = format!(
+            "```json\n{{\n  \"verdict\": \"approved\",\n  \"summary\": \"Planner accepted.\",\n  \"issues\": [],\n  \"revised_plan\": {revised_plan:?}\n}}\n```"
+        );
+        let summary =
+            LocalContainerService::summarize_assistant_message(&format!("{prefix}{verdict_block}"));
+
+        let verdict = parse_verdict(&summary).expect("stored summary should keep large verdict");
+        assert_eq!(verdict.verdict, VerdictStatus::Approved);
+        assert_eq!(verdict.summary, "Planner accepted.");
+        assert_eq!(verdict.revised_plan.as_deref(), Some(revised_plan.as_str()));
     }
 
     #[test]

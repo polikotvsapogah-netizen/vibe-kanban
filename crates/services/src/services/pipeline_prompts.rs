@@ -45,10 +45,38 @@ If everything passes, approve with a summary suitable for a PR description.";
 const DEFAULT_PROMPT: &str = "You are a pipeline agent. Complete the assigned task carefully and \
 report your results.";
 
-const VERDICT_INSTRUCTION: &str = "\n\nIMPORTANT: End your response with a verdict block:\n\
+const DEFAULT_VERDICT_INSTRUCTION: &str = "\n\nIMPORTANT: End your response with a verdict block:\n\
 ```json\n\
 {\"verdict\": \"approved|needs_changes|failed\", \"summary\": \"brief description\", \"issues\": []}\n\
 ```";
+
+const PLANNER_VERDICT_INSTRUCTION: &str = "\n\nIMPORTANT: End your response with a verdict block:\n\
+```json\n\
+{\"verdict\": \"approved|needs_changes|failed\", \"summary\": \"brief description\", \"issues\": [], \"revised_plan\": \"full markdown plan\"}\n\
+```";
+
+const REVIEWER_CONSENSUS_VERDICT_INSTRUCTION: &str = "\n\nIMPORTANT: End your response with a verdict block:\n\
+```json\n\
+{\"verdict\": \"approved|needs_changes|failed\", \"summary\": \"brief description\", \"issues\": [], \"revised_plan\": \"final agreed plan\", \"what_changed\": [], \"why_changed\": [], \"unresolved_issues\": []}\n\
+```";
+
+const REVIEWER_STRICT_VERDICT_INSTRUCTION: &str = "\n\nIMPORTANT: End your response with a verdict block:\n\
+```json\n\
+{\"verdict\": \"approved|needs_changes|failed\", \"summary\": \"brief description\", \"issues\": [], \"blockers\": [], \"non_blockers\": [], \"missing_steps\": [], \"risks\": [], \"suggested_fixes\": []}\n\
+```";
+
+#[derive(Clone, Copy)]
+enum StagePromptKind {
+    Planner,
+    ReviewerConsensus,
+    ReviewerStrict,
+    Builder,
+    BuilderFix,
+    CodeReviewer,
+    Tester,
+    Finisher,
+    Default,
+}
 
 fn policy_instruction(policy: &str) -> Option<&'static str> {
     match policy {
@@ -68,41 +96,78 @@ fn policy_instruction(policy: &str) -> Option<&'static str> {
     }
 }
 
+fn resolve_stage_prompt_kind(
+    role: &str,
+    workflow_profile: Option<&str>,
+    workflow_mode: Option<&str>,
+) -> StagePromptKind {
+    let profile = workflow_profile.unwrap_or(role);
+    match profile {
+        "writing-plans" => StagePromptKind::Planner,
+        "brainstorming" if role == "planner" => StagePromptKind::Planner,
+        "brainstorming" => match workflow_mode.unwrap_or("consensus") {
+            "strict" => StagePromptKind::ReviewerStrict,
+            _ => StagePromptKind::ReviewerConsensus,
+        },
+        "executing-plans" => StagePromptKind::Builder,
+        "requesting-code-review" => StagePromptKind::CodeReviewer,
+        "receiving-code-review" => StagePromptKind::BuilderFix,
+        "verification-before-completion" => StagePromptKind::Tester,
+        "finishing-a-development-branch" => StagePromptKind::Finisher,
+        _ => match role {
+            "planner" => StagePromptKind::Planner,
+            "reviewer" => {
+                if workflow_mode == Some("strict") {
+                    StagePromptKind::ReviewerStrict
+                } else {
+                    StagePromptKind::ReviewerConsensus
+                }
+            }
+            "builder" => StagePromptKind::Builder,
+            "code_reviewer" => StagePromptKind::CodeReviewer,
+            "tester" => StagePromptKind::Tester,
+            "finisher" => StagePromptKind::Finisher,
+            _ => StagePromptKind::Default,
+        },
+    }
+}
+
+fn base_prompt(kind: StagePromptKind) -> &'static str {
+    match kind {
+        StagePromptKind::Planner => PLANNER_PROMPT,
+        StagePromptKind::ReviewerConsensus => REVIEWER_CONSENSUS_PROMPT,
+        StagePromptKind::ReviewerStrict => REVIEWER_STRICT_PROMPT,
+        StagePromptKind::Builder => BUILDER_PROMPT,
+        StagePromptKind::BuilderFix => BUILDER_FIX_PROMPT,
+        StagePromptKind::CodeReviewer => CODE_REVIEWER_PROMPT,
+        StagePromptKind::Tester => TESTER_PROMPT,
+        StagePromptKind::Finisher => FINISHER_PROMPT,
+        StagePromptKind::Default => DEFAULT_PROMPT,
+    }
+}
+
+fn verdict_instruction(kind: StagePromptKind) -> &'static str {
+    match kind {
+        StagePromptKind::Planner => PLANNER_VERDICT_INSTRUCTION,
+        StagePromptKind::ReviewerConsensus => REVIEWER_CONSENSUS_VERDICT_INSTRUCTION,
+        StagePromptKind::ReviewerStrict => REVIEWER_STRICT_VERDICT_INSTRUCTION,
+        StagePromptKind::Builder
+        | StagePromptKind::BuilderFix
+        | StagePromptKind::CodeReviewer
+        | StagePromptKind::Tester
+        | StagePromptKind::Finisher
+        | StagePromptKind::Default => DEFAULT_VERDICT_INSTRUCTION,
+    }
+}
+
 pub fn get_stage_prompt(
     role: &str,
     workflow_profile: Option<&str>,
     workflow_mode: Option<&str>,
     policies: &[String],
 ) -> String {
-    let profile = workflow_profile.unwrap_or(role);
-    let base = match profile {
-        "writing-plans" => PLANNER_PROMPT,
-        "brainstorming" if role == "planner" => PLANNER_PROMPT,
-        "brainstorming" => match workflow_mode.unwrap_or("consensus") {
-            "strict" => REVIEWER_STRICT_PROMPT,
-            _ => REVIEWER_CONSENSUS_PROMPT,
-        },
-        "executing-plans" => BUILDER_PROMPT,
-        "requesting-code-review" => CODE_REVIEWER_PROMPT,
-        "receiving-code-review" => BUILDER_FIX_PROMPT,
-        "verification-before-completion" => TESTER_PROMPT,
-        "finishing-a-development-branch" => FINISHER_PROMPT,
-        _ => match role {
-            "planner" => PLANNER_PROMPT,
-            "reviewer" => {
-                if workflow_mode == Some("strict") {
-                    REVIEWER_STRICT_PROMPT
-                } else {
-                    REVIEWER_CONSENSUS_PROMPT
-                }
-            }
-            "builder" => BUILDER_PROMPT,
-            "code_reviewer" => CODE_REVIEWER_PROMPT,
-            "tester" => TESTER_PROMPT,
-            "finisher" => FINISHER_PROMPT,
-            _ => DEFAULT_PROMPT,
-        },
-    };
+    let kind = resolve_stage_prompt_kind(role, workflow_profile, workflow_mode);
+    let base = base_prompt(kind);
 
     let mut prompt = base.to_string();
 
@@ -113,7 +178,7 @@ pub fn get_stage_prompt(
         }
     }
 
-    prompt.push_str(VERDICT_INSTRUCTION);
+    prompt.push_str(verdict_instruction(kind));
     prompt
 }
 
@@ -151,6 +216,19 @@ mod tests {
         let policies = vec!["require_tests".to_string()];
         let prompt = get_stage_prompt("builder", None, None, &policies);
         assert!(prompt.contains("MUST write and run tests"));
+    }
+
+    #[test]
+    fn test_planner_prompt_includes_revised_plan_verdict_contract() {
+        let prompt = get_stage_prompt("planner", None, None, &[]);
+        assert!(prompt.contains("\"revised_plan\""));
+    }
+
+    #[test]
+    fn test_strict_reviewer_prompt_includes_blockers_verdict_contract() {
+        let prompt = get_stage_prompt("reviewer", None, Some("strict"), &[]);
+        assert!(prompt.contains("\"blockers\""));
+        assert!(prompt.contains("\"suggested_fixes\""));
     }
 
     #[test]
