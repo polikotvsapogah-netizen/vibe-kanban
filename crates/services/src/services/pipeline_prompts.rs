@@ -74,7 +74,10 @@ pub fn get_stage_prompt(
     workflow_mode: Option<&str>,
     policies: &[String],
 ) -> String {
-    let base = match workflow_profile.unwrap_or(role) {
+    let profile = workflow_profile.unwrap_or(role);
+    let base = match profile {
+        "writing-plans" => PLANNER_PROMPT,
+        "brainstorming" if role == "planner" => PLANNER_PROMPT,
         "brainstorming" => match workflow_mode.unwrap_or("consensus") {
             "strict" => REVIEWER_STRICT_PROMPT,
             _ => REVIEWER_CONSENSUS_PROMPT,
@@ -184,6 +187,20 @@ mod tests {
     fn test_workflow_profile_brainstorming_strict() {
         let prompt = get_stage_prompt("builder", Some("brainstorming"), Some("strict"), &[]);
         assert!(prompt.contains("strict mode"));
+    }
+
+    #[test]
+    fn test_planner_brainstorming_profile_uses_planner_prompt() {
+        let prompt = get_stage_prompt("planner", Some("brainstorming"), Some("consensus"), &[]);
+        assert!(prompt.contains("planning agent"));
+        assert!(!prompt.contains("plan review agent"));
+    }
+
+    #[test]
+    fn test_writing_plans_profile_uses_planner_prompt() {
+        let prompt = get_stage_prompt("planner", Some("writing-plans"), None, &[]);
+        assert!(prompt.contains("planning agent"));
+        assert!(!prompt.contains("plan review agent"));
     }
 
     #[test]

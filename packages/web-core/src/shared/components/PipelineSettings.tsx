@@ -73,7 +73,7 @@ function getDefaultConfig(): PipelineConfig {
         max_retries: null,
         escalate_agent: null,
         escalate_after_retries: null,
-        workflow_profile: 'brainstorming',
+        workflow_profile: 'writing-plans',
         workflow_mode: 'consensus',
         policies: ['structured_verdict', 'structured_handoff'],
       },

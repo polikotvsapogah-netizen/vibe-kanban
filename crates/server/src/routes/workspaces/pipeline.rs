@@ -67,6 +67,15 @@ struct ApprovalContext {
     stage_id: String,
     saved_stage_id: String,
     saved_payload: String,
+    initial_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovalPayload {
+    #[serde(default)]
+    stage_id: Option<String>,
+    #[serde(default)]
+    initial_prompt: Option<String>,
 }
 
 struct LoadedPipelineContext {
@@ -140,9 +149,18 @@ fn require_awaiting_approval(state: &PipelineState) -> Result<(), ApiError> {
 }
 
 fn build_approval_context(state: &PipelineState) -> ApprovalContext {
+    let parsed_payload = state
+        .approval_payload
+        .as_deref()
+        .and_then(|payload| serde_json::from_str::<ApprovalPayload>(payload).ok());
     let stage_id = state
         .approval_stage_id
         .clone()
+        .or_else(|| {
+            parsed_payload
+                .as_ref()
+                .and_then(|payload| payload.stage_id.clone())
+        })
         .unwrap_or_else(|| state.current_stage_id.clone());
 
     ApprovalContext {
@@ -154,6 +172,10 @@ fn build_approval_context(state: &PipelineState) -> ApprovalContext {
             .approval_payload
             .clone()
             .unwrap_or_else(|| serde_json::json!({ "stage_id": stage_id }).to_string()),
+        initial_prompt: parsed_payload
+            .and_then(|payload| payload.initial_prompt)
+            .map(|prompt| prompt.trim().to_string())
+            .filter(|prompt| !prompt.is_empty()),
         stage_id,
     }
 }
@@ -306,11 +328,15 @@ fn append_handoff_prompt_additions(
 
 fn build_stage_prompt_additions(
     feedback: Option<&str>,
+    initial_prompt: Option<&str>,
     artifact: Option<&HandoffArtifact>,
     plan_label: &str,
     summary_label: &str,
 ) -> Vec<String> {
     let mut prompt_additions = Vec::new();
+    if let Some(initial_prompt) = initial_prompt.filter(|prompt| !prompt.trim().is_empty()) {
+        prompt_additions.push(initial_prompt.trim().to_string());
+    }
     if let Some(feedback) = feedback {
         prompt_additions.push(format!("Human reviewer feedback: {feedback}"));
     }
@@ -448,6 +474,7 @@ pub async fn approve_pipeline(
         serde_json::from_str(&state.handoff_artifacts).unwrap_or_default();
     let prompt_additions = build_stage_prompt_additions(
         None,
+        approval.initial_prompt.as_deref(),
         handoff_artifacts.get(&approval.stage_id),
         "Approved plan",
         "Review summary",
@@ -522,6 +549,7 @@ pub async fn reject_pipeline(
         serde_json::from_str(&state.handoff_artifacts).unwrap_or_default();
     let prompt_additions = build_stage_prompt_additions(
         payload.feedback.as_deref(),
+        None,
         handoff_artifacts.get(&fail_stage.id),
         "Previous plan",
         "Previous review summary",
@@ -658,6 +686,7 @@ mod tests {
 
         let additions = build_stage_prompt_additions(
             Some("please tighten the naming"),
+            None,
             Some(&artifact),
             "Approved plan",
             "Review summary",
@@ -703,6 +732,58 @@ mod tests {
         assert_eq!(context.stage_id, "reviewer");
         assert_eq!(context.saved_stage_id, "reviewer");
         assert_eq!(context.saved_payload, "{\"stage_id\":\"reviewer\"}");
+        assert_eq!(context.initial_prompt, None);
+    }
+
+    #[test]
+    fn test_build_approval_context_extracts_initial_prompt() {
+        let state = PipelineState {
+            id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            pipeline_config: "{}".to_string(),
+            current_stage_id: "planner".to_string(),
+            status: "paused".to_string(),
+            retry_counts: "{}".to_string(),
+            stage_history: "[]".to_string(),
+            handoff_artifacts: "{}".to_string(),
+            role_sessions: "{}".to_string(),
+            awaiting_approval: true,
+            approval_stage_id: Some("planner".to_string()),
+            approval_payload: Some(
+                "{\"stage_id\":\"planner\",\"initial_prompt\":\"  write regression tests  \"}"
+                    .to_string(),
+            ),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let context = build_approval_context(&state);
+
+        assert_eq!(context.stage_id, "planner");
+        assert_eq!(
+            context.initial_prompt.as_deref(),
+            Some("write regression tests")
+        );
+    }
+
+    #[test]
+    fn test_build_stage_prompt_additions_includes_initial_prompt_before_feedback() {
+        let additions = build_stage_prompt_additions(
+            Some("please tighten the naming"),
+            Some("implement workspace summary sync"),
+            None,
+            "Approved plan",
+            "Review summary",
+        );
+
+        assert_eq!(
+            additions.first().map(String::as_str),
+            Some("implement workspace summary sync")
+        );
+        assert_eq!(
+            additions.get(1).map(String::as_str),
+            Some("Human reviewer feedback: please tighten the naming")
+        );
     }
 }
 

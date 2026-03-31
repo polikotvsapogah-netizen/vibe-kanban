@@ -17,6 +17,7 @@ use executors::{
         review::{RepoReviewContext, ReviewRequest},
     },
     executors::{BaseCodingAgent, build_review_prompt},
+    model_selector::PermissionPolicy,
     profile::ExecutorConfig,
 };
 use sqlx::SqlitePool;
@@ -131,7 +132,7 @@ pub async fn start_pipeline_stage(
     // ── 3. Resolve executor (agent string → BaseCodingAgent) ──────
 
     let base_agent = parse_agent_name(agent)?;
-    let executor_config = ExecutorConfig::new(base_agent);
+    let executor_config = build_pipeline_executor_config(base_agent);
 
     // ── 4. Build ExecutorAction ────────────────────────────────────
 
@@ -234,6 +235,12 @@ fn build_pipeline_review_prompt(
     build_review_prompt(context, Some(additional_prompt))
 }
 
+fn build_pipeline_executor_config(base_agent: BaseCodingAgent) -> ExecutorConfig {
+    let mut config = ExecutorConfig::new(base_agent);
+    config.permission_policy = Some(PermissionPolicy::Auto);
+    config
+}
+
 async fn build_pipeline_review_context(
     container: &(impl ContainerService + ?Sized + Sync),
     pool: &SqlitePool,
@@ -302,5 +309,12 @@ mod tests {
         assert!(prompt.contains("base commit abc123"));
         assert!(prompt.contains("git diff abc123..HEAD"));
         assert!(prompt.contains("Review all code changes made by the builder."));
+    }
+
+    #[test]
+    fn test_pipeline_executor_forces_auto_permission_policy() {
+        let config = build_pipeline_executor_config(BaseCodingAgent::ClaudeCode);
+
+        assert_eq!(config.permission_policy, Some(PermissionPolicy::Auto));
     }
 }

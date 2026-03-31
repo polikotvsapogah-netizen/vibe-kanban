@@ -255,6 +255,17 @@ impl LocalContainerService {
         }
     }
 
+    fn should_handle_pipeline_transition(
+        run_reason: &ExecutionProcessRunReason,
+        success: bool,
+        cleanup_done: bool,
+        has_pipeline: bool,
+    ) -> bool {
+        success
+            || cleanup_done
+            || (has_pipeline && matches!(run_reason, ExecutionProcessRunReason::CodingAgent))
+    }
+
     fn derive_pipeline_pr_body(summary: Option<&str>) -> Option<String> {
         summary.map(|summary| {
             verdict_parser::parse_verdict(summary)
@@ -809,48 +820,69 @@ impl LocalContainerService {
                 );
 
                 let mut already_finalized = false;
-
-                if success || cleanup_done {
-                    // Commit changes (if any) and get feedback about whether changes were made
-                    let changes_committed = match container.try_commit_changes(&ctx).await {
-                        Ok(committed) => committed,
-                        Err(e) => {
-                            tracing::error!("Failed to commit changes after execution: {}", e);
-                            // Treat commit failures as if changes were made to be safe
-                            true
-                        }
-                    };
-
-                    let has_commits_from_execution = if matches!(
+                let has_pipeline =
+                    matches!(
                         ctx.execution_process.run_reason,
                         ExecutionProcessRunReason::CodingAgent
-                    ) {
-                        container
-                            .has_commits_from_execution(&ctx)
-                            .await
-                            .unwrap_or(false)
-                    } else {
-                        false
-                    };
-                    let should_start_next = LocalContainerService::should_start_next_after_commit(
-                        &ctx.execution_process.run_reason,
-                        changes_committed,
-                        has_commits_from_execution,
-                    );
+                    ) && PipelineState::find_by_workspace_id(&db.pool, ctx.workspace.id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some();
 
-                    if should_start_next {
+                if LocalContainerService::should_handle_pipeline_transition(
+                    &ctx.execution_process.run_reason,
+                    success,
+                    cleanup_done,
+                    has_pipeline,
+                ) {
+                    if success || cleanup_done {
+                        // Commit changes (if any) and get feedback about whether changes were made
+                        let changes_committed = match container.try_commit_changes(&ctx).await {
+                            Ok(committed) => committed,
+                            Err(e) => {
+                                tracing::error!("Failed to commit changes after execution: {}", e);
+                                // Treat commit failures as if changes were made to be safe
+                                true
+                            }
+                        };
+
+                        let has_commits_from_execution = if matches!(
+                            ctx.execution_process.run_reason,
+                            ExecutionProcessRunReason::CodingAgent
+                        ) {
+                            container
+                                .has_commits_from_execution(&ctx)
+                                .await
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+                        let should_start_next =
+                            LocalContainerService::should_start_next_after_commit(
+                                &ctx.execution_process.run_reason,
+                                changes_committed,
+                                has_commits_from_execution,
+                            );
+
+                        if should_start_next {
+                            already_finalized = container
+                                .handle_pipeline_transition_after_completion(&ctx)
+                                .await;
+                        } else {
+                            tracing::info!(
+                                "Skipping cleanup script for workspace {} - no changes made by coding agent",
+                                ctx.workspace.id
+                            );
+
+                            // Manually finalize task since we're bypassing normal execution flow
+                            container.finalize_task(&ctx).await;
+                            already_finalized = true;
+                        }
+                    } else {
                         already_finalized = container
                             .handle_pipeline_transition_after_completion(&ctx)
                             .await;
-                    } else {
-                        tracing::info!(
-                            "Skipping cleanup script for workspace {} - no changes made by coding agent",
-                            ctx.workspace.id
-                        );
-
-                        // Manually finalize task since we're bypassing normal execution flow
-                        container.finalize_task(&ctx).await;
-                        already_finalized = true;
                     }
                 }
 
@@ -1904,6 +1936,22 @@ mod tests {
     fn should_start_next_after_commit_for_non_coding_runs_always_continues() {
         assert!(LocalContainerService::should_start_next_after_commit(
             &ExecutionProcessRunReason::CleanupScript,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn should_handle_pipeline_transition_for_failed_pipeline_execution() {
+        assert!(LocalContainerService::should_handle_pipeline_transition(
+            &ExecutionProcessRunReason::CodingAgent,
+            false,
+            false,
+            true,
+        ));
+        assert!(!LocalContainerService::should_handle_pipeline_transition(
+            &ExecutionProcessRunReason::CodingAgent,
+            false,
             false,
             false,
         ));

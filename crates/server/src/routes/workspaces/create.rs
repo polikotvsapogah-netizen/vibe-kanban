@@ -10,8 +10,7 @@ use db::models::{
 };
 use deployment::Deployment;
 use services::services::{
-    container::ContainerService, pipeline_executor, pipeline_prompts,
-    pipeline_types::PipelineConfig,
+    container::ContainerService, pipeline_executor, pipeline_types::PipelineConfig,
 };
 use utils::response::ApiResponse;
 use uuid::Uuid;
@@ -76,6 +75,23 @@ fn normalize_prompt(prompt: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn build_initial_stage_prompt_additions(prompt: &str) -> Vec<String> {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        vec![]
+    } else {
+        vec![trimmed.to_string()]
+    }
+}
+
+fn build_first_stage_approval_payload(stage_id: &str, initial_prompt: &str) -> String {
+    serde_json::json!({
+        "stage_id": stage_id,
+        "initial_prompt": initial_prompt.trim(),
+    })
+    .to_string()
 }
 
 fn escape_markdown_label(label: &str) -> String {
@@ -297,7 +313,7 @@ pub async fn create_and_start_workspace(
         }
     }
 
-    let workspace = managed_workspace.workspace.clone();
+    let mut workspace = managed_workspace.workspace.clone();
     tracing::info!("Created workspace {}", workspace.id);
 
     // ── Pipeline initialisation (opt-in) ──────────────────────────
@@ -316,16 +332,6 @@ pub async fn create_and_start_workspace(
 
         let first_stage = &config.stages[0];
         let first_stage_id = first_stage.id.clone();
-
-        // Prepend the first stage's role prompt (including verdict instruction)
-        // to the workspace prompt so the first execution runs within the pipeline.
-        let stage_prompt = pipeline_prompts::get_stage_prompt(
-            &first_stage.role,
-            first_stage.workflow_profile.as_deref(),
-            first_stage.workflow_mode.as_deref(),
-            &first_stage.policies,
-        );
-        workspace_prompt = format!("{}\n\n{}", stage_prompt, workspace_prompt);
 
         PipelineState::create(
             &deployment.db().pool,
@@ -362,7 +368,7 @@ pub async fn create_and_start_workspace(
                     .await?
                     .ok_or_else(|| ApiError::BadRequest("Pipeline state not found".to_string()))?;
 
-            let payload = serde_json::json!({ "stage_id": first_stage.id }).to_string();
+            let payload = build_first_stage_approval_payload(&first_stage.id, &workspace_prompt);
             PipelineState::set_approval(
                 &deployment.db().pool,
                 workspace.id,
@@ -376,7 +382,8 @@ pub async fn create_and_start_workspace(
             })?;
 
             // Create the container but don't start execution.
-            deployment.container().create(&workspace).await?;
+            let container_ref = deployment.container().create(&workspace).await?;
+            workspace.container_ref = Some(container_ref.to_string());
 
             deployment
                 .track_if_analytics_allowed(
@@ -404,7 +411,9 @@ pub async fn create_and_start_workspace(
                 .ok_or_else(|| ApiError::BadRequest("Pipeline state not found".to_string()))?;
 
         // Create container first.
-        deployment.container().create(&workspace).await?;
+        let container_ref = deployment.container().create(&workspace).await?;
+        workspace.container_ref = Some(container_ref.to_string());
+        let initial_prompt_additions = build_initial_stage_prompt_additions(&workspace_prompt);
 
         let started = pipeline_executor::start_pipeline_stage(
             deployment.container(),
@@ -415,7 +424,7 @@ pub async fn create_and_start_workspace(
             &first_stage.role,
             &first_stage.agent,
             None,
-            &[],
+            &initial_prompt_additions,
             false,
         )
         .await
@@ -479,7 +488,10 @@ mod tests {
     use db::models::file::File;
     use uuid::Uuid;
 
-    use super::{ImportedIssueAttachment, rewrite_imported_issue_attachments_markdown};
+    use super::{
+        ImportedIssueAttachment, build_first_stage_approval_payload,
+        build_initial_stage_prompt_additions, rewrite_imported_issue_attachments_markdown,
+    };
 
     fn imported_file(
         attachment_id: Uuid,
@@ -519,6 +531,21 @@ mod tests {
             rewritten,
             "[proposal.pdf](.vibe-attachments/abc_proposal.pdf)"
         );
+    }
+
+    #[test]
+    fn builds_initial_stage_prompt_additions_from_trimmed_prompt() {
+        let additions = build_initial_stage_prompt_additions("  implement workspace sync  ");
+        assert_eq!(additions, vec!["implement workspace sync".to_string()]);
+    }
+
+    #[test]
+    fn first_stage_approval_payload_includes_initial_prompt() {
+        let payload = build_first_stage_approval_payload("planner", "  plan the task  ");
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(value["stage_id"], "planner");
+        assert_eq!(value["initial_prompt"], "plan the task");
     }
 
     #[test]
