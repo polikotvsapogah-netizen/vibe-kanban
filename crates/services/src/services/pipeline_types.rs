@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use strum_macros::{Display, EnumString};
 use ts_rs::TS;
 
 /// Pipeline configuration — snapshot stored at creation time
@@ -116,8 +117,9 @@ pub struct StageHistoryEntry {
 }
 
 /// Pipeline status enum
-#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq, Display, EnumString)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum PipelineStatus {
     Running,
     Paused,
@@ -127,7 +129,7 @@ pub enum PipelineStatus {
 }
 
 impl PipelineStatus {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Running => "running",
             Self::Paused => "paused",
@@ -136,15 +138,34 @@ impl PipelineStatus {
             Self::ReadyForPr => "ready_for_pr",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "running" => Some(Self::Running),
-            "paused" => Some(Self::Paused),
-            "completed" => Some(Self::Completed),
-            "failed" => Some(Self::Failed),
-            "ready_for_pr" => Some(Self::ReadyForPr),
-            _ => None,
+#[cfg(test)]
+mod tests {
+    use super::PipelineStatus;
+
+    #[test]
+    fn pipeline_status_display_and_parse_round_trip() {
+        let statuses = [
+            PipelineStatus::Running,
+            PipelineStatus::Paused,
+            PipelineStatus::Completed,
+            PipelineStatus::Failed,
+            PipelineStatus::ReadyForPr,
+        ];
+
+        for status in statuses {
+            let rendered = status.to_string();
+            let parsed = rendered
+                .parse::<PipelineStatus>()
+                .expect("status should parse");
+            assert_eq!(parsed, status);
         }
+    }
+
+    #[test]
+    fn pipeline_status_rejects_unknown_values() {
+        let parsed = "not_a_real_status".parse::<PipelineStatus>();
+        assert!(parsed.is_err());
     }
 }

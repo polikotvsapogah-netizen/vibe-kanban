@@ -10,6 +10,10 @@ use tracing;
 use uuid::Uuid;
 
 use crate::services::{
+    pipeline_handoff::{
+        HandoffPromptFormat, HandoffPromptLabels, IssuePresentation, PlanPresentation,
+        build_handoff_prompt_additions,
+    },
     pipeline_types::{
         HandoffArtifact, PipelineConfig, PipelineStatus, StageConfig, StageHistoryEntry, Verdict,
         VerdictStatus,
@@ -145,11 +149,13 @@ impl PipelineController {
             }
         };
 
+        let next_status = next_status.to_string();
+
         PipelineState::update_stage(
             pool,
             workspace_id,
             &next_stage_id,
-            next_status.as_str(),
+            &next_status,
             &serde_json::to_string(&retry_counts)?,
             &serde_json::to_string(&stage_history)?,
             &serde_json::to_string(&handoff_artifacts)?,
@@ -305,23 +311,13 @@ impl PipelineController {
         };
 
         let incoming = handoff_artifacts.get(&current_stage.id);
-        let final_plan = Self::derive_final_plan(verdict, incoming);
-
-        let artifact = HandoffArtifact {
-            from_stage: current_stage.id.clone(),
-            to_stage: next_stage.id.clone(),
-            review_summary: Some(verdict.summary.clone()),
-            final_plan,
-            constraints: incoming
-                .map(|artifact| artifact.constraints.clone())
-                .unwrap_or_default(),
-            risks: verdict.risks.clone(),
-            acceptance_criteria: incoming
-                .map(|artifact| artifact.acceptance_criteria.clone())
-                .unwrap_or_default(),
-            issues: verdict.issues.clone(),
-            test_report: None,
-        };
+        let artifact = Self::build_handoff_artifact(
+            &current_stage.id,
+            &next_stage.id,
+            verdict,
+            incoming,
+            None,
+        );
         handoff_artifacts.insert(next_stage.id.clone(), artifact);
 
         // Record the session for this role so follow-ups reuse it.
@@ -395,23 +391,13 @@ impl PipelineController {
             // Build a handoff with the review issues so the retry stage knows
             // what to fix.
             let incoming = handoff_artifacts.get(&current_stage.id);
-            let final_plan = Self::derive_final_plan(verdict, incoming);
-
-            let artifact = HandoffArtifact {
-                from_stage: current_stage.id.clone(),
-                to_stage: fail_stage.id.clone(),
-                review_summary: Some(verdict.summary.clone()),
-                final_plan,
-                constraints: incoming
-                    .map(|artifact| artifact.constraints.clone())
-                    .unwrap_or_default(),
-                risks: verdict.risks.clone(),
-                acceptance_criteria: incoming
-                    .map(|artifact| artifact.acceptance_criteria.clone())
-                    .unwrap_or_default(),
-                issues: verdict.issues.clone(),
-                test_report: None,
-            };
+            let artifact = Self::build_handoff_artifact(
+                &current_stage.id,
+                &fail_stage.id,
+                verdict,
+                incoming,
+                None,
+            );
             handoff_artifacts.insert(fail_stage.id.clone(), artifact);
 
             role_sessions.insert(current_stage.role.clone(), session_id.to_string());
@@ -451,23 +437,13 @@ impl PipelineController {
                     };
 
                     let incoming = handoff_artifacts.get(&current_stage.id);
-                    let final_plan = Self::derive_final_plan(verdict, incoming);
-
-                    let artifact = HandoffArtifact {
-                        from_stage: current_stage.id.clone(),
-                        to_stage: fail_stage.id.clone(),
-                        review_summary: Some(verdict.summary.clone()),
-                        final_plan,
-                        constraints: incoming
-                            .map(|artifact| artifact.constraints.clone())
-                            .unwrap_or_default(),
-                        risks: verdict.risks.clone(),
-                        acceptance_criteria: incoming
-                            .map(|artifact| artifact.acceptance_criteria.clone())
-                            .unwrap_or_default(),
-                        issues: verdict.issues.clone(),
-                        test_report: None,
-                    };
+                    let artifact = Self::build_handoff_artifact(
+                        &current_stage.id,
+                        &fail_stage.id,
+                        verdict,
+                        incoming,
+                        None,
+                    );
                     handoff_artifacts.insert(fail_stage.id.clone(), artifact);
 
                     role_sessions.insert(current_stage.role.clone(), session_id.to_string());
@@ -501,42 +477,46 @@ impl PipelineController {
         handoff_artifacts: &HashMap<String, HandoffArtifact>,
         stage_id: &str,
     ) -> Vec<String> {
-        let mut additions = Vec::new();
-        if let Some(artifact) = handoff_artifacts.get(stage_id) {
-            if let Some(ref summary) = artifact.review_summary {
-                additions.push(format!("Previous review summary: {}", summary));
-            }
-            if let Some(ref plan) = artifact.final_plan {
-                additions.push(format!("Revised plan: {}", plan));
-            }
-            if !artifact.constraints.is_empty() {
-                additions.push(format!(
-                    "Constraints:\n- {}",
-                    artifact.constraints.join("\n- ")
-                ));
-            }
-            if !artifact.acceptance_criteria.is_empty() {
-                additions.push(format!(
-                    "Acceptance criteria:\n- {}",
-                    artifact.acceptance_criteria.join("\n- ")
-                ));
-            }
-            if !artifact.risks.is_empty() {
-                additions.push(format!("Known risks:\n- {}", artifact.risks.join("\n- ")));
-            }
-            for issue in &artifact.issues {
-                let loc = match (&issue.file, issue.line) {
-                    (Some(f), Some(l)) => format!(" ({}:{})", f, l),
-                    (Some(f), None) => format!(" ({})", f),
-                    _ => String::new(),
-                };
-                additions.push(format!("Issue{}: {}", loc, issue.description));
-            }
-            if let Some(ref report) = artifact.test_report {
-                additions.push(format!("Test report:\n{}", report));
-            }
+        handoff_artifacts
+            .get(stage_id)
+            .map(|artifact| {
+                build_handoff_prompt_additions(
+                    artifact,
+                    HandoffPromptFormat {
+                        labels: HandoffPromptLabels {
+                            plan: "Revised plan",
+                            summary: "Previous review summary",
+                        },
+                        plan_presentation: PlanPresentation::Inline,
+                        issue_presentation: IssuePresentation::Inline,
+                    },
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    fn build_handoff_artifact(
+        from_stage: &str,
+        to_stage: &str,
+        verdict: &Verdict,
+        incoming: Option<&HandoffArtifact>,
+        test_report: Option<String>,
+    ) -> HandoffArtifact {
+        HandoffArtifact {
+            from_stage: from_stage.to_string(),
+            to_stage: to_stage.to_string(),
+            review_summary: Some(verdict.summary.clone()),
+            final_plan: Self::derive_final_plan(verdict, incoming),
+            constraints: incoming
+                .map(|artifact| artifact.constraints.clone())
+                .unwrap_or_default(),
+            risks: verdict.risks.clone(),
+            acceptance_criteria: incoming
+                .map(|artifact| artifact.acceptance_criteria.clone())
+                .unwrap_or_default(),
+            issues: verdict.issues.clone(),
+            test_report,
         }
-        additions
     }
 
     fn derive_final_plan(verdict: &Verdict, incoming: Option<&HandoffArtifact>) -> Option<String> {
@@ -877,5 +857,59 @@ mod tests {
         assert!(combined.contains("Known risks:\n- migration may be slow"));
         assert!(combined.contains("Issue (src/lib.rs:42): handle timeout"));
         assert!(combined.contains("Test report:\n2 passed, 0 failed"));
+    }
+
+    #[test]
+    fn test_build_handoff_artifact_carries_forward_context_and_verdict() {
+        let incoming = HandoffArtifact {
+            from_stage: "planner".to_string(),
+            to_stage: "reviewer".to_string(),
+            final_plan: Some("old plan".to_string()),
+            review_summary: Some("old summary".to_string()),
+            constraints: vec!["keep api stable".to_string()],
+            risks: vec!["old risk".to_string()],
+            acceptance_criteria: vec!["tests pass".to_string()],
+            issues: vec![],
+            test_report: None,
+        };
+        let verdict = Verdict {
+            verdict: VerdictStatus::NeedsChanges,
+            summary: "needs better error handling".to_string(),
+            issues: vec![VerdictIssue {
+                file: Some("src/lib.rs".to_string()),
+                line: Some(42),
+                description: "missing timeout handling".to_string(),
+            }],
+            revised_plan: Some("updated plan".to_string()),
+            what_changed: vec![],
+            why_changed: vec![],
+            unresolved_issues: vec![],
+            blockers: vec![],
+            non_blockers: vec![],
+            missing_steps: vec![],
+            risks: vec!["migration may be slow".to_string()],
+            suggested_fixes: vec![],
+        };
+
+        let artifact = PipelineController::build_handoff_artifact(
+            "reviewer",
+            "builder",
+            &verdict,
+            Some(&incoming),
+            None,
+        );
+
+        assert_eq!(artifact.from_stage, "reviewer");
+        assert_eq!(artifact.to_stage, "builder");
+        assert_eq!(
+            artifact.review_summary.as_deref(),
+            Some("needs better error handling")
+        );
+        assert_eq!(artifact.final_plan.as_deref(), Some("updated plan"));
+        assert_eq!(artifact.constraints, vec!["keep api stable"]);
+        assert_eq!(artifact.acceptance_criteria, vec!["tests pass"]);
+        assert_eq!(artifact.risks, vec!["migration may be slow"]);
+        assert_eq!(artifact.issues.len(), 1);
+        assert_eq!(artifact.issues[0].line, Some(42));
     }
 }
