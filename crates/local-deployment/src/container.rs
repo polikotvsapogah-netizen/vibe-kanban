@@ -35,7 +35,10 @@ use executors::{
     approvals::{ExecutorApprovalService, NoopExecutorApprovalService},
     env::{ExecutionEnv, RepoContext},
     executors::{BaseCodingAgent, CancellationToken, ExecutorExitResult, ExecutorExitSignal},
-    logs::{NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch},
+    logs::{
+        ActionType, NormalizedEntry, NormalizedEntryType, ToolResultValueType,
+        utils::patch::extract_normalized_entry_from_patch,
+    },
 };
 use futures::{FutureExt, TryStreamExt, stream::select};
 use git::GitService;
@@ -1199,25 +1202,51 @@ impl LocalContainerService {
             .map_err(|e| ContainerError::Other(anyhow!("{e}")))
     }
 
-    /// Extract the last assistant message from the MsgStore history
+    fn extract_summary_from_normalized_entry(entry: &NormalizedEntry) -> Option<String> {
+        match &entry.entry_type {
+            NormalizedEntryType::AssistantMessage => {
+                let content = entry.content.trim();
+                (!content.is_empty()).then(|| Self::summarize_assistant_message(content))
+            }
+            NormalizedEntryType::ToolUse {
+                tool_name,
+                action_type:
+                    ActionType::TaskCreate {
+                        result: Some(result),
+                        ..
+                    },
+                ..
+            } if tool_name == "Review"
+                && matches!(result.r#type, ToolResultValueType::Markdown) =>
+            {
+                result
+                    .value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|content| !content.is_empty())
+                    .map(Self::summarize_assistant_message)
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract the last assistant message or review result from the MsgStore history
     fn extract_last_assistant_message(&self, exec_id: &Uuid) -> Option<String> {
         // Get the MsgStore for this execution
         let msg_stores = self.msg_stores.try_read().ok()?;
         let msg_store = msg_stores.get(exec_id)?;
 
-        // Get the history and scan in reverse for the last assistant message
+        // Get the history and scan in reverse for the last assistant message or
+        // review result that represents the terminal output.
         let history = msg_store.get_history();
 
         for msg in history.iter().rev() {
             if let LogMsg::JsonPatch(patch) = msg {
                 // Try to extract a NormalizedEntry from the patch
                 if let Some((_, entry)) = extract_normalized_entry_from_patch(patch)
-                    && matches!(entry.entry_type, NormalizedEntryType::AssistantMessage)
+                    && let Some(summary) = Self::extract_summary_from_normalized_entry(&entry)
                 {
-                    let content = entry.content.trim();
-                    if !content.is_empty() {
-                        return Some(Self::summarize_assistant_message(content));
-                    }
+                    return Some(summary);
                 }
             }
         }
@@ -1944,6 +1973,9 @@ fn success_exit_status() -> std::process::ExitStatus {
 #[cfg(test)]
 mod tests {
     use db::models::execution_process::ExecutionProcessRunReason;
+    use executors::logs::{
+        ActionType, NormalizedEntry, NormalizedEntryType, ToolResult, ToolStatus,
+    };
     use services::services::{pipeline_types::VerdictStatus, verdict_parser::parse_verdict};
 
     use super::{LocalContainerService, MAX_SUMMARY_LENGTH, SUMMARY_MIDDLE_TRUNCATION};
@@ -2100,5 +2132,33 @@ cargo test -p services verdict_parser\n\
             LocalContainerService::summarize_assistant_message(summary),
             summary
         );
+    }
+
+    #[test]
+    fn extract_summary_from_review_result_preserves_verdict() {
+        let entry = NormalizedEntry {
+            timestamp: None,
+            entry_type: NormalizedEntryType::ToolUse {
+                tool_name: "Review".to_string(),
+                action_type: ActionType::TaskCreate {
+                    description: "Reviewing code".to_string(),
+                    subagent_type: Some("review".to_string()),
+                    result: Some(ToolResult::markdown(
+                        "Looks good.\n```json\n{\"verdict\":\"approved\",\"summary\":\"review passed\",\"issues\":[]}\n```",
+                    )),
+                },
+                status: ToolStatus::Success,
+            },
+            content: String::new(),
+            metadata: None,
+        };
+
+        let summary = LocalContainerService::extract_summary_from_normalized_entry(&entry)
+            .expect("review result should be captured as summary");
+
+        let verdict =
+            parse_verdict(&summary).expect("review summary should preserve structured verdict");
+        assert_eq!(verdict.verdict, VerdictStatus::Approved);
+        assert_eq!(verdict.summary, "review passed");
     }
 }

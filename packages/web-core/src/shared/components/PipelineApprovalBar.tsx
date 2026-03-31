@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useState, type MouseEvent } from 'react';
 import { Button } from '@vibe/ui/components/Button';
 import {
   Tooltip,
@@ -32,6 +32,10 @@ export function PipelineApprovalBar({
   const [hasResponded, setHasResponded] = useState(false);
 
   const disabled = isApproving || isRejecting || hasResponded;
+
+  const stopCardNavigation = useCallback((event: MouseEvent<HTMLElement>) => {
+    event.stopPropagation();
+  }, []);
 
   const handleApprove = useCallback(async () => {
     if (disabled) return;
@@ -89,7 +93,10 @@ export function PipelineApprovalBar({
     .replace(/\b\w/g, (c) => c.toUpperCase());
 
   return (
-    <div className="bg-background border border-border/60 rounded-sm px-2 py-1.5 text-xs sm:text-sm">
+    <div
+      className="bg-background border border-border/60 rounded-sm px-2 py-1.5 text-xs sm:text-sm"
+      onClick={stopCardNavigation}
+    >
       <TooltipProvider>
         <div className="flex items-center justify-between gap-1.5 pl-4">
           <div className="flex items-center gap-1.5">

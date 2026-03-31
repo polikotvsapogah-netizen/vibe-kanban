@@ -235,26 +235,18 @@ fn resolve_rejection_target(
     config: &PipelineConfig,
     approval_stage_id: &str,
 ) -> Result<ApprovalRejectionTarget, ApiError> {
-    let producer_stage = config
+    let approval_stage = config
         .stages
         .iter()
-        .find(|s| s.on_success == approval_stage_id);
+        .find(|s| s.id == approval_stage_id)
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "Approval stage '{}' not found in pipeline config",
+                approval_stage_id
+            ))
+        })?;
 
-    let fail_stage_id = if let Some(producer) = producer_stage {
-        &producer.on_fail
-    } else {
-        let approval_stage = config
-            .stages
-            .iter()
-            .find(|s| s.id == approval_stage_id)
-            .ok_or_else(|| {
-                ApiError::BadRequest(format!(
-                    "Approval stage '{}' not found in pipeline config",
-                    approval_stage_id
-                ))
-            })?;
-        &approval_stage.on_fail
-    };
+    let fail_stage_id = &approval_stage.on_fail;
 
     if fail_stage_id == "pause" {
         return Ok(ApprovalRejectionTarget::Pause);
@@ -602,9 +594,25 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_rejection_target_returns_pause() {
+    fn test_resolve_rejection_target_uses_approval_stage_on_fail() {
         let planner = make_stage("planner", "reviewer", "pause");
         let mut reviewer = make_stage("reviewer", "builder", "planner");
+        reviewer.approval = "approval".to_string();
+        let builder = make_stage("builder", "complete", "planner");
+        let config = make_config(vec![planner, reviewer, builder]);
+
+        let result = resolve_rejection_target(&config, "reviewer").unwrap();
+
+        match result {
+            ApprovalRejectionTarget::Stage(stage) => assert_eq!(stage.id, "planner"),
+            ApprovalRejectionTarget::Pause => panic!("expected planner retry target"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_rejection_target_returns_pause_when_approval_stage_fails_to_pause() {
+        let planner = make_stage("planner", "reviewer", "planner");
+        let mut reviewer = make_stage("reviewer", "builder", "pause");
         reviewer.approval = "approval".to_string();
         let builder = make_stage("builder", "complete", "planner");
         let config = make_config(vec![planner, reviewer, builder]);

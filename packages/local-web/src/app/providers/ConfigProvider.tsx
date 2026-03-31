@@ -18,7 +18,7 @@ export function UserSystemProvider({ children }: UserSystemProviderProps) {
     []
   );
 
-  const { value, userSystemInfo } = useUserSystemController({
+  const { value, userSystemInfo, isLoading } = useUserSystemController({
     queryKey: ['user-system', 'local'],
     load: loadConfig,
     save: saveConfig,
@@ -38,6 +38,20 @@ export function UserSystemProvider({ children }: UserSystemProviderProps) {
   useEffect(() => {
     tokenManager.syncRecoveryState();
   }, [value.loginStatus?.status, value.remoteAuthDegraded]);
+
+  const hasRemoteApiBase = Boolean(
+    userSystemInfo?.shared_api_base || import.meta.env.VITE_VK_SHARED_API_BASE
+  );
+
+  if (isLoading && !hasRemoteApiBase) {
+    return (
+      <UserSystemContext.Provider value={value}>
+        <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">
+          Loading configuration...
+        </div>
+      </UserSystemContext.Provider>
+    );
+  }
 
   return (
     <UserSystemContext.Provider value={value}>

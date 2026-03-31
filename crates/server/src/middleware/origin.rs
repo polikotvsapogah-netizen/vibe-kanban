@@ -136,18 +136,46 @@ fn default_port(https: bool) -> u16 {
     if https { 443 } else { 80 }
 }
 
+fn dev_frontend_origins_for_port(port: u16) -> Vec<OriginKey> {
+    [
+        format!("http://localhost:{port}"),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://[::1]:{port}"),
+    ]
+    .into_iter()
+    .filter_map(|origin| OriginKey::from_origin(&origin))
+    .collect()
+}
+
+fn dev_frontend_origins() -> Vec<OriginKey> {
+    let port = std::env::var("FRONTEND_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(3000);
+    dev_frontend_origins_for_port(port)
+}
+
 fn allowed_origins() -> &'static Vec<OriginKey> {
     static ALLOWED: OnceLock<Vec<OriginKey>> = OnceLock::new();
     ALLOWED.get_or_init(|| {
-        let value = match std::env::var("VK_ALLOWED_ORIGINS") {
-            Ok(value) => value,
-            Err(_) => return Vec::new(),
-        };
+        let mut allowed = std::env::var("VK_ALLOWED_ORIGINS")
+            .ok()
+            .into_iter()
+            .flat_map(|value| {
+                value
+                    .split(',')
+                    .filter_map(|origin| OriginKey::from_origin(origin.trim()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
 
-        value
-            .split(',')
-            .filter_map(|origin| OriginKey::from_origin(origin.trim()))
-            .collect()
+        for origin in dev_frontend_origins() {
+            if !allowed.contains(&origin) {
+                allowed.push(origin);
+            }
+        }
+
+        allowed
     })
 }
 
@@ -256,5 +284,20 @@ mod tests {
         // Explicit default port matches implicit
         let mut req = make_request(Some("http://example.com:80"), Some("example.com"));
         assert!(validate_origin(&mut req).is_ok());
+    }
+
+    #[test]
+    fn allows_dev_frontend_origin_from_env_port() {
+        let expected = dev_frontend_origins_for_port(3003);
+        assert!(
+            expected
+                .iter()
+                .any(|origin| origin == &OriginKey::from_origin("http://127.0.0.1:3003").unwrap())
+        );
+        assert!(
+            expected
+                .iter()
+                .any(|origin| origin == &OriginKey::from_origin("http://localhost:3003").unwrap())
+        );
     }
 }
