@@ -101,13 +101,14 @@ impl LocalContainerService {
             return trimmed.to_string();
         }
 
-        if let Some(verdict_block) = extract_terminal_json_block(trimmed) {
+        if let Some(verdict_json) = verdict_parser::extract_verdict_json(trimmed) {
+            let verdict_block = format!("```json\n{}\n```", verdict_json.trim());
             let available_prefix_budget = MAX_SUMMARY_LENGTH
                 .saturating_sub(verdict_block.len())
                 .saturating_sub(SUMMARY_MIDDLE_TRUNCATION.len());
 
             if available_prefix_budget == 0 {
-                return verdict_block.to_string();
+                return verdict_block;
             }
 
             let prefix = truncate_to_char_boundary(trimmed, available_prefix_budget);
@@ -1418,15 +1419,6 @@ impl LocalContainerService {
     }
 }
 
-fn extract_terminal_json_block(text: &str) -> Option<&str> {
-    let start = text.rfind("```json")?;
-    let after_start = &text[start..];
-    let body = after_start.strip_prefix("```json")?;
-    let end_offset = body.find("```")?;
-    let end = start + "```json".len() + end_offset + "```".len();
-    Some(text[start..end].trim())
-}
-
 fn failure_exit_status() -> std::process::ExitStatus {
     #[cfg(unix)]
     {
@@ -2071,6 +2063,34 @@ mod tests {
         assert_eq!(verdict.verdict, VerdictStatus::Approved);
         assert_eq!(verdict.summary, "Planner accepted.");
         assert_eq!(verdict.revised_plan.as_deref(), Some(revised_plan.as_str()));
+    }
+
+    #[test]
+    fn summarize_assistant_message_preserves_verdict_with_embedded_code_fences() {
+        let prefix = "Implementation plan details.\n".repeat(200);
+        let revised_plan = "\
+# Plan\n\
+\n\
+1. Add a regression test.\n\
+\n\
+```bash\n\
+cargo test -p services verdict_parser\n\
+```\n\
+\n\
+```json\n\
+{\"note\": \"example fixture\"}\n\
+```\n";
+        let verdict_block = format!(
+            "```json\n{{\n  \"verdict\": \"approved\",\n  \"summary\": \"Planner accepted.\",\n  \"issues\": [],\n  \"revised_plan\": {revised_plan:?}\n}}\n```"
+        );
+        let summary =
+            LocalContainerService::summarize_assistant_message(&format!("{prefix}{verdict_block}"));
+
+        let verdict = parse_verdict(&summary)
+            .expect("stored summary should keep verdict even with embedded code fences");
+        assert_eq!(verdict.verdict, VerdictStatus::Approved);
+        assert_eq!(verdict.summary, "Planner accepted.");
+        assert_eq!(verdict.revised_plan.as_deref(), Some(revised_plan));
     }
 
     #[test]

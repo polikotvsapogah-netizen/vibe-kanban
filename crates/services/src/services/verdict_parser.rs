@@ -6,17 +6,22 @@ use crate::services::pipeline_types::Verdict;
 /// 1. JSON fenced code blocks (` ```json … ``` `)
 /// 2. Raw JSON objects that contain a `"verdict"` key
 pub fn parse_verdict(summary: &str) -> Option<Verdict> {
+    extract_verdict_json(summary).and_then(try_parse_verdict_json)
+}
+
+/// Extract the parseable verdict JSON payload from an agent summary.
+pub fn extract_verdict_json(summary: &str) -> Option<&str> {
     // 1. Try fenced code blocks first — most reliable signal.
     // Search from the end because the pipeline contract requires the verdict block
     // to be the final structured JSON in the response.
     for block in extract_json_code_blocks(summary).into_iter().rev() {
-        if let Some(v) = try_parse_verdict_json(block) {
-            return Some(v);
+        if try_parse_verdict_json(block).is_some() {
+            return Some(block.trim());
         }
     }
 
     // 2. Fall back to scanning for a raw JSON object.
-    try_find_raw_verdict_json(summary)
+    try_find_raw_verdict_json_slice(summary)
 }
 
 /// Return slices of text that appear inside ` ```json … ``` ` fences.
@@ -53,7 +58,7 @@ fn try_parse_verdict_json(json_str: &str) -> Option<Verdict> {
 
 /// Scan `text` for a `{` that begins a JSON object containing `"verdict"`,
 /// then try to parse the balanced object.
-fn try_find_raw_verdict_json(text: &str) -> Option<Verdict> {
+fn try_find_raw_verdict_json_slice(text: &str) -> Option<&str> {
     for (abs_brace, _) in text.rmatch_indices('{') {
         let candidate = &text[abs_brace..];
 
@@ -61,8 +66,8 @@ fn try_find_raw_verdict_json(text: &str) -> Option<Verdict> {
         if candidate.contains("\"verdict\"") {
             if let Some(end) = find_matching_brace(candidate) {
                 let json_candidate = &candidate[..=end];
-                if let Some(v) = try_parse_verdict_json(json_candidate) {
-                    return Some(v);
+                if try_parse_verdict_json(json_candidate).is_some() {
+                    return Some(json_candidate.trim());
                 }
             }
         }
