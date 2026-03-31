@@ -200,8 +200,9 @@ impl RemoteClient {
             let leeway = ChronoDuration::seconds(Self::TOKEN_REFRESH_LEEWAY_SECS);
             let creds = self
                 .auth_context
-                .get_credentials()
+                .ensure_credentials_loaded()
                 .await
+                .map_err(|e| RemoteClientError::Storage(e.to_string()))?
                 .ok_or(RemoteClientError::Auth)?;
 
             if let Some(token) = creds.access_token.as_ref()
@@ -214,8 +215,9 @@ impl RemoteClient {
                 let _refresh_guard = self.auth_context.refresh_guard().await;
                 let latest = self
                     .auth_context
-                    .get_credentials()
+                    .ensure_credentials_loaded()
                     .await
+                    .map_err(|e| RemoteClientError::Storage(e.to_string()))?
                     .ok_or(RemoteClientError::Auth)?;
                 if let Some(token) = latest.access_token.as_ref()
                     && !latest.expires_soon(leeway)

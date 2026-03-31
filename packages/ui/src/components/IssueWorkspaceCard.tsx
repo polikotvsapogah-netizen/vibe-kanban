@@ -57,6 +57,7 @@ export interface IssueWorkspaceCardProps {
   onClick?: () => void;
   onUnlink?: () => void;
   onDelete?: () => void;
+  footer?: React.ReactNode;
   showOwner?: boolean;
   showStatusBadge?: boolean;
   showNoPrText?: boolean;
@@ -119,6 +120,7 @@ export function IssueWorkspaceCard({
   onClick,
   onUnlink,
   onDelete,
+  footer,
   showOwner = true,
   showStatusBadge = true,
   showNoPrText = true,
@@ -227,6 +229,8 @@ export function IssueWorkspaceCard({
           awaitingApproval={workspace.pipelineAwaitingApproval}
         />
       )}
+
+      {footer}
 
       {/* Row 2: Live status + stats (left), PR buttons (right) */}
       <div className="flex items-center justify-between gap-half min-w-0">

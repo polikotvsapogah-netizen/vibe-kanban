@@ -403,7 +403,15 @@ impl LocalDeployment {
     }
 
     pub async fn get_login_status(&self) -> LoginStatus {
-        if self.auth_context.get_credentials().await.is_none() {
+        let credentials = match self.auth_context.ensure_credentials_loaded().await {
+            Ok(credentials) => credentials,
+            Err(err) => {
+                tracing::warn!(?err, "failed to reload persisted OAuth credentials");
+                None
+            }
+        };
+
+        if credentials.is_none() {
             self.auth_context.clear_profile().await;
             self.auth_context.clear_remote_auth_degraded_slug().await;
             return LoginStatus::LoggedOut;

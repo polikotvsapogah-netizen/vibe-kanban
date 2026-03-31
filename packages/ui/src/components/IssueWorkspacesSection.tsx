@@ -17,6 +17,7 @@ export interface IssueWorkspacesSectionProps {
   onCreateWorkspace?: () => void;
   onUnlinkWorkspace?: (localWorkspaceId: string) => void;
   onDeleteWorkspace?: (localWorkspaceId: string) => void;
+  renderWorkspaceFooter?: (workspace: WorkspaceWithStats) => React.ReactNode;
   shouldAnimateCreateButton?: boolean;
 }
 
@@ -32,6 +33,7 @@ export function IssueWorkspacesSection({
   onCreateWorkspace,
   onUnlinkWorkspace,
   onDeleteWorkspace,
+  renderWorkspaceFooter,
   shouldAnimateCreateButton = false,
 }: IssueWorkspacesSectionProps) {
   const { t } = useTranslation('common');
@@ -77,6 +79,7 @@ export function IssueWorkspacesSection({
                     ? () => onDeleteWorkspace(localWorkspaceId)
                     : undefined
                 }
+                footer={renderWorkspaceFooter?.(workspace)}
               />
             );
           })

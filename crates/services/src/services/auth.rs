@@ -30,6 +30,15 @@ impl AuthContext {
         self.oauth.get().await
     }
 
+    pub async fn ensure_credentials_loaded(&self) -> std::io::Result<Option<Credentials>> {
+        if let Some(creds) = self.oauth.get().await {
+            return Ok(Some(creds));
+        }
+
+        self.oauth.load().await?;
+        Ok(self.oauth.get().await)
+    }
+
     pub async fn save_credentials(&self, creds: &Credentials) -> std::io::Result<()> {
         self.oauth.save(creds).await
     }
@@ -68,5 +77,61 @@ impl AuthContext {
 
     pub async fn refresh_guard(&self) -> OwnedMutexGuard<()> {
         self.refresh_lock.clone().lock_owned().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn test_credentials() -> Credentials {
+        Credentials {
+            access_token: Some("access-token".to_string()),
+            refresh_token: "refresh-token".to_string(),
+            expires_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_credentials_loaded_restores_persisted_refresh_token() {
+        let temp_dir = TempDir::new().unwrap();
+        let oauth = Arc::new(OAuthCredentials::new(
+            temp_dir.path().join("credentials.json"),
+        ));
+        let auth = AuthContext::new(oauth.clone(), Arc::new(RwLock::new(None)));
+
+        auth.save_credentials(&test_credentials()).await.unwrap();
+        auth.clear_session_credentials().await.unwrap();
+
+        let loaded = auth.ensure_credentials_loaded().await.unwrap();
+
+        assert!(loaded.is_some(), "persisted credentials should be restored");
+        assert_eq!(
+            loaded.unwrap().refresh_token,
+            "refresh-token",
+            "restored credentials should come from disk"
+        );
+        assert!(
+            auth.get_credentials().await.is_some(),
+            "restored credentials should be cached in memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_credentials_loaded_stays_empty_without_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let oauth = Arc::new(OAuthCredentials::new(
+            temp_dir.path().join("credentials.json"),
+        ));
+        let auth = AuthContext::new(oauth, Arc::new(RwLock::new(None)));
+
+        let loaded = auth.ensure_credentials_loaded().await.unwrap();
+
+        assert!(
+            loaded.is_none(),
+            "missing credentials file should stay logged out"
+        );
     }
 }

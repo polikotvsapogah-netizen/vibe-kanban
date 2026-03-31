@@ -1,8 +1,11 @@
 import { useMemo, useCallback } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useParams } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
 import { LinkIcon, PlusIcon } from '@phosphor-icons/react';
+import { PipelineApprovalBar } from '@/shared/components/PipelineApprovalBar';
 import { useProjectContext } from '@/shared/hooks/useProjectContext';
+import { workspaceSummaryKeys } from '@/shared/hooks/workspaceSummaryKeys';
 import { useAuth } from '@/shared/hooks/auth/useAuth';
 import { useOrgContext } from '@/shared/hooks/useOrgContext';
 import { useUserContext } from '@/shared/hooks/useUserContext';
@@ -36,6 +39,7 @@ export function IssueWorkspacesSectionContainer({
 }: IssueWorkspacesSectionContainerProps) {
   const { t } = useTranslation('common');
   const { projectId } = useParams({ strict: false });
+  const queryClient = useQueryClient();
   const appNavigation = useAppNavigation();
   const { openWorkspaceCreateFromState } = useProjectWorkspaceCreateDraft();
   const { userId } = useAuth();
@@ -292,6 +296,34 @@ export function IssueWorkspacesSectionContainer({
     [localWorkspacesById, workspacesWithStats, t, issueId, getIssue]
   );
 
+  const refreshPipelineStatus = useCallback(async () => {
+    await queryClient.invalidateQueries({
+      queryKey: workspaceSummaryKeys.all,
+    });
+  }, [queryClient]);
+
+  const renderWorkspaceFooter = useCallback(
+    (workspace: WorkspaceWithStats) => {
+      if (
+        !workspace.localWorkspaceId ||
+        !workspace.pipelineAwaitingApproval ||
+        !workspace.pipelineStage
+      ) {
+        return null;
+      }
+
+      return (
+        <PipelineApprovalBar
+          workspaceId={workspace.localWorkspaceId}
+          stageName={workspace.pipelineStage}
+          onApprove={() => void refreshPipelineStatus()}
+          onReject={() => void refreshPipelineStatus()}
+        />
+      );
+    },
+    [refreshPipelineStatus]
+  );
+
   // Actions for the section header
   const actions: SectionAction[] = useMemo(
     () => [
@@ -316,6 +348,7 @@ export function IssueWorkspacesSectionContainer({
       onCreateWorkspace={handleAddWorkspace}
       onUnlinkWorkspace={handleUnlinkWorkspace}
       onDeleteWorkspace={handleDeleteWorkspace}
+      renderWorkspaceFooter={renderWorkspaceFooter}
       shouldAnimateCreateButton={shouldAnimateCreateButton}
     />
   );
