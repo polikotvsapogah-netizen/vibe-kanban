@@ -69,6 +69,8 @@ use workspace_manager::{RepoWorkspaceInput, WorkspaceError, WorkspaceManager};
 use crate::{command, copy};
 
 const WORKSPACE_TOUCH_DEBOUNCE: Duration = Duration::from_mins(2);
+const MAX_SUMMARY_LENGTH: usize = 4096;
+const SUMMARY_MIDDLE_TRUNCATION: &str = "\n...\n";
 
 #[derive(Clone)]
 pub struct LocalContainerService {
@@ -93,6 +95,27 @@ pub struct LocalContainerService {
 }
 
 impl LocalContainerService {
+    fn summarize_assistant_message(content: &str) -> String {
+        let trimmed = content.trim();
+        if trimmed.len() <= MAX_SUMMARY_LENGTH {
+            return trimmed.to_string();
+        }
+
+        let suffix_budget = MAX_SUMMARY_LENGTH / 2;
+        let prefix_budget = MAX_SUMMARY_LENGTH
+            .saturating_sub(suffix_budget)
+            .saturating_sub(SUMMARY_MIDDLE_TRUNCATION.len());
+
+        let prefix = truncate_to_char_boundary(trimmed, prefix_budget);
+        let suffix_start = trimmed.len().saturating_sub(suffix_budget);
+        let suffix_start = (suffix_start..trimmed.len())
+            .find(|&i| trimmed.is_char_boundary(i))
+            .unwrap_or(trimmed.len());
+        let suffix = &trimmed[suffix_start..];
+
+        format!("{prefix}{SUMMARY_MIDDLE_TRUNCATION}{suffix}")
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         db: DBService,
@@ -247,9 +270,10 @@ impl LocalContainerService {
         run_reason: &ExecutionProcessRunReason,
         changes_committed: bool,
         has_commits_from_execution: bool,
+        has_pipeline: bool,
     ) -> bool {
         if matches!(run_reason, ExecutionProcessRunReason::CodingAgent) {
-            changes_committed || has_commits_from_execution
+            has_pipeline || changes_committed || has_commits_from_execution
         } else {
             true
         }
@@ -863,6 +887,7 @@ impl LocalContainerService {
                                 &ctx.execution_process.run_reason,
                                 changes_committed,
                                 has_commits_from_execution,
+                                has_pipeline,
                             );
 
                         if should_start_next {
@@ -1177,12 +1202,7 @@ impl LocalContainerService {
                 {
                     let content = entry.content.trim();
                     if !content.is_empty() {
-                        const MAX_SUMMARY_LENGTH: usize = 4096;
-                        if content.len() > MAX_SUMMARY_LENGTH {
-                            let truncated = truncate_to_char_boundary(content, MAX_SUMMARY_LENGTH);
-                            return Some(format!("{truncated}..."));
-                        }
-                        return Some(content.to_string());
+                        return Some(Self::summarize_assistant_message(content));
                     }
                 }
             }
@@ -1910,8 +1930,9 @@ fn success_exit_status() -> std::process::ExitStatus {
 #[cfg(test)]
 mod tests {
     use db::models::execution_process::ExecutionProcessRunReason;
+    use services::services::{pipeline_types::VerdictStatus, verdict_parser::parse_verdict};
 
-    use super::LocalContainerService;
+    use super::{LocalContainerService, MAX_SUMMARY_LENGTH, SUMMARY_MIDDLE_TRUNCATION};
 
     #[test]
     fn should_start_next_after_commit_for_coding_agent_requires_changes_or_commits() {
@@ -1919,14 +1940,27 @@ mod tests {
             &ExecutionProcessRunReason::CodingAgent,
             false,
             false,
+            false,
         ));
         assert!(LocalContainerService::should_start_next_after_commit(
             &ExecutionProcessRunReason::CodingAgent,
             true,
             false,
+            false,
         ));
         assert!(LocalContainerService::should_start_next_after_commit(
             &ExecutionProcessRunReason::CodingAgent,
+            false,
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn should_start_next_after_commit_for_pipeline_coding_agent_without_changes() {
+        assert!(LocalContainerService::should_start_next_after_commit(
+            &ExecutionProcessRunReason::CodingAgent,
+            false,
             false,
             true,
         ));
@@ -1936,6 +1970,7 @@ mod tests {
     fn should_start_next_after_commit_for_non_coding_runs_always_continues() {
         assert!(LocalContainerService::should_start_next_after_commit(
             &ExecutionProcessRunReason::CleanupScript,
+            false,
             false,
             false,
         ));
@@ -1976,6 +2011,36 @@ mod tests {
         assert_eq!(
             LocalContainerService::derive_pipeline_pr_body(summary),
             Some("plain summary without verdict block".to_string())
+        );
+    }
+
+    #[test]
+    fn summarize_assistant_message_preserves_tail_verdict() {
+        let prefix = "Implementation plan details.\n".repeat(250);
+        let verdict_block = r#"
+```json
+{
+  "verdict": "approved",
+  "summary": "Planner accepted.",
+  "issues": []
+}
+```"#;
+        let summary =
+            LocalContainerService::summarize_assistant_message(&format!("{prefix}{verdict_block}"));
+
+        assert!(summary.len() <= MAX_SUMMARY_LENGTH + SUMMARY_MIDDLE_TRUNCATION.len());
+
+        let verdict = parse_verdict(&summary).expect("truncated summary should keep verdict");
+        assert_eq!(verdict.verdict, VerdictStatus::Approved);
+        assert_eq!(verdict.summary, "Planner accepted.");
+    }
+
+    #[test]
+    fn summarize_assistant_message_keeps_short_content_unchanged() {
+        let summary = "Short assistant summary.";
+        assert_eq!(
+            LocalContainerService::summarize_assistant_message(summary),
+            summary
         );
     }
 }
