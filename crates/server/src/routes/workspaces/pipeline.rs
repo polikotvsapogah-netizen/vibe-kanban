@@ -16,7 +16,11 @@ use serde::{Deserialize, Serialize};
 use services::services::{
     container::ContainerService,
     pipeline_executor,
-    pipeline_types::{HandoffArtifact, PipelineConfig, StageConfig},
+    pipeline_handoff::{
+        HandoffPromptFormat, HandoffPromptLabels, IssuePresentation, PlanPresentation,
+        build_handoff_prompt_additions,
+    },
+    pipeline_types::{HandoffArtifact, PipelineConfig, PipelineStatus, StageConfig},
 };
 use sqlx::SqlitePool;
 use ts_rs::TS;
@@ -58,6 +62,18 @@ enum ApprovalRejectionTarget {
     Stage(StageConfig),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ApprovalContext {
+    stage_id: String,
+    saved_stage_id: String,
+    saved_payload: String,
+}
+
+struct LoadedPipelineContext {
+    state: PipelineState,
+    config: PipelineConfig,
+}
+
 // ── Router ─────────────────────────────────────────────────────────
 
 pub fn router() -> Router<DeploymentImpl> {
@@ -86,6 +102,111 @@ fn build_status_response(state: &PipelineState, config: &PipelineConfig) -> Pipe
         stage_count: config.stages.len(),
         current_stage_index,
     }
+}
+
+fn success_status_response<E>(
+    state: &PipelineState,
+    config: &PipelineConfig,
+) -> ResponseJson<ApiResponse<PipelineStatusResponse, E>> {
+    ResponseJson(ApiResponse::success(build_status_response(state, config)))
+}
+
+async fn load_pipeline_context(
+    pool: &SqlitePool,
+    workspace_id: Uuid,
+) -> Result<LoadedPipelineContext, ApiError> {
+    let state = PipelineState::find_by_workspace_id(pool, workspace_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::BadRequest("No pipeline configured for this workspace".to_string())
+        })?;
+
+    let config: PipelineConfig = serde_json::from_str(&state.pipeline_config).map_err(|e| {
+        tracing::error!("Failed to parse pipeline config: {}", e);
+        ApiError::BadRequest("Invalid pipeline configuration".to_string())
+    })?;
+
+    Ok(LoadedPipelineContext { state, config })
+}
+
+fn require_awaiting_approval(state: &PipelineState) -> Result<(), ApiError> {
+    if state.awaiting_approval {
+        Ok(())
+    } else {
+        Err(ApiError::BadRequest(
+            "Pipeline is not awaiting approval".to_string(),
+        ))
+    }
+}
+
+fn build_approval_context(state: &PipelineState) -> ApprovalContext {
+    let stage_id = state
+        .approval_stage_id
+        .clone()
+        .unwrap_or_else(|| state.current_stage_id.clone());
+
+    ApprovalContext {
+        saved_stage_id: state
+            .approval_stage_id
+            .clone()
+            .unwrap_or_else(|| stage_id.clone()),
+        saved_payload: state
+            .approval_payload
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({ "stage_id": stage_id }).to_string()),
+        stage_id,
+    }
+}
+
+fn find_stage_config<'a>(
+    config: &'a PipelineConfig,
+    stage_id: &str,
+) -> Result<&'a StageConfig, ApiError> {
+    config
+        .stages
+        .iter()
+        .find(|s| s.id == stage_id)
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!("Stage '{}' not found in pipeline config", stage_id))
+        })
+}
+
+async fn clear_approval_flag(pool: &SqlitePool, workspace_id: Uuid) -> Result<(), ApiError> {
+    PipelineState::clear_approval(pool, workspace_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to clear approval: {}", e);
+            ApiError::BadRequest("Failed to clear approval".to_string())
+        })
+}
+
+async fn set_pipeline_status(
+    pool: &SqlitePool,
+    workspace_id: Uuid,
+    status: PipelineStatus,
+    error_message: &'static str,
+) -> Result<(), ApiError> {
+    PipelineState::set_status(pool, workspace_id, status.as_str())
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to set pipeline status '{}': {}", status.as_str(), e);
+            ApiError::BadRequest(error_message.to_string())
+        })
+}
+
+async fn fetch_updated_status_response(
+    pool: &SqlitePool,
+    workspace_id: Uuid,
+    config: &PipelineConfig,
+) -> Result<ResponseJson<ApiResponse<PipelineStatusResponse>>, ApiError> {
+    let updated_state = PipelineState::find_by_workspace_id(pool, workspace_id)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("Pipeline state not found after update".to_string()))?;
+
+    Ok(success_status_response::<PipelineStatusResponse>(
+        &updated_state,
+        config,
+    ))
 }
 
 fn resolve_rejection_target(
@@ -170,170 +291,84 @@ fn append_handoff_prompt_additions(
     plan_label: &str,
     summary_label: &str,
 ) {
-    if let Some(plan) = artifact.final_plan.as_deref() {
-        prompt_additions.push(format!("{plan_label}:\n{plan}"));
-    }
-    if let Some(summary) = artifact.review_summary.as_deref() {
-        prompt_additions.push(format!("{summary_label}: {summary}"));
-    }
-    if !artifact.constraints.is_empty() {
-        prompt_additions.push(format!(
-            "Constraints:\n- {}",
-            artifact.constraints.join("\n- ")
-        ));
-    }
-    if !artifact.acceptance_criteria.is_empty() {
-        prompt_additions.push(format!(
-            "Acceptance criteria:\n- {}",
-            artifact.acceptance_criteria.join("\n- ")
-        ));
-    }
-    if !artifact.risks.is_empty() {
-        prompt_additions.push(format!("Known risks:\n- {}", artifact.risks.join("\n- ")));
-    }
-    if !artifact.issues.is_empty() {
-        let formatted: Vec<String> = artifact
-            .issues
-            .iter()
-            .map(|issue| match (&issue.file, issue.line) {
-                (Some(file), Some(line)) => format!("- {file}:{line}: {}", issue.description),
-                (Some(file), None) => format!("- {file}: {}", issue.description),
-                _ => format!("- {}", issue.description),
-            })
-            .collect();
-        prompt_additions.push(format!("Outstanding issues:\n{}", formatted.join("\n")));
-    }
-    if let Some(report) = artifact.test_report.as_deref() {
-        prompt_additions.push(format!("Test report:\n{report}"));
-    }
+    prompt_additions.extend(build_handoff_prompt_additions(
+        artifact,
+        HandoffPromptFormat {
+            labels: HandoffPromptLabels {
+                plan: plan_label,
+                summary: summary_label,
+            },
+            plan_presentation: PlanPresentation::Block,
+            issue_presentation: IssuePresentation::BulletList,
+        },
+    ));
 }
 
-// ── GET /status ────────────────────────────────────────────────────
-
-pub async fn get_pipeline_status(
-    Extension(workspace): Extension<Workspace>,
-    State(deployment): State<DeploymentImpl>,
-) -> Result<ResponseJson<ApiResponse<PipelineStatusResponse>>, ApiError> {
-    let pool = &deployment.db().pool;
-
-    let state = PipelineState::find_by_workspace_id(pool, workspace.id)
-        .await?
-        .ok_or_else(|| {
-            ApiError::BadRequest("No pipeline configured for this workspace".to_string())
-        })?;
-
-    let config: PipelineConfig = serde_json::from_str(&state.pipeline_config).map_err(|e| {
-        tracing::error!("Failed to parse pipeline config: {}", e);
-        ApiError::BadRequest("Invalid pipeline configuration".to_string())
-    })?;
-
-    Ok(ResponseJson(ApiResponse::success(build_status_response(
-        &state, &config,
-    ))))
+fn build_stage_prompt_additions(
+    feedback: Option<&str>,
+    artifact: Option<&HandoffArtifact>,
+    plan_label: &str,
+    summary_label: &str,
+) -> Vec<String> {
+    let mut prompt_additions = Vec::new();
+    if let Some(feedback) = feedback {
+        prompt_additions.push(format!("Human reviewer feedback: {feedback}"));
+    }
+    if let Some(artifact) = artifact {
+        append_handoff_prompt_additions(&mut prompt_additions, artifact, plan_label, summary_label);
+    }
+    prompt_additions
 }
 
-// ── POST /approve ──────────────────────────────────────────────────
-
-pub async fn approve_pipeline(
-    Extension(workspace): Extension<Workspace>,
-    State(deployment): State<DeploymentImpl>,
-) -> Result<ResponseJson<ApiResponse<PipelineStatusResponse>>, ApiError> {
-    let pool = &deployment.db().pool;
-
-    let state = PipelineState::find_by_workspace_id(pool, workspace.id)
-        .await?
-        .ok_or_else(|| {
-            ApiError::BadRequest("No pipeline configured for this workspace".to_string())
-        })?;
-
-    if !state.awaiting_approval {
-        return Err(ApiError::BadRequest(
-            "Pipeline is not awaiting approval".to_string(),
-        ));
-    }
-
-    let config: PipelineConfig = serde_json::from_str(&state.pipeline_config).map_err(|e| {
-        tracing::error!("Failed to parse pipeline config: {}", e);
-        ApiError::BadRequest("Invalid pipeline configuration".to_string())
-    })?;
-
-    // Find the stage that is pending approval.
-    let stage_id = state
-        .approval_stage_id
-        .clone()
-        .unwrap_or_else(|| state.current_stage_id.clone());
-
-    let stage_config = config
-        .stages
-        .iter()
-        .find(|s| s.id == stage_id)
-        .ok_or_else(|| {
-            ApiError::BadRequest(format!("Stage '{}' not found in pipeline config", stage_id))
-        })?;
-
-    // Save approval info before clearing, so we can restore on failure.
-    let saved_approval_stage_id = state
-        .approval_stage_id
-        .clone()
-        .unwrap_or_else(|| stage_id.clone());
-    let saved_approval_payload = state
-        .approval_payload
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({ "stage_id": stage_id }).to_string());
-
-    // Clear the approval flag first.
-    PipelineState::clear_approval(pool, workspace.id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to clear approval: {}", e);
-            ApiError::BadRequest("Failed to clear approval".to_string())
-        })?;
-
-    // Look up existing session for this role.
-    let role_sessions: HashMap<String, String> =
-        serde_json::from_str(&state.role_sessions).unwrap_or_default();
+fn resolve_stage_session(
+    role_sessions: &HashMap<String, String>,
+    role: &str,
+) -> (Option<Uuid>, bool) {
     let session_id = role_sessions
-        .get(&stage_config.role)
+        .get(role)
         .and_then(|s| Uuid::parse_str(s).ok());
     let is_follow_up = session_id.is_some();
+    (session_id, is_follow_up)
+}
 
-    // Build prompt additions from handoff artifacts — pass ALL fields, not just review_summary.
-    let handoff_artifacts: HashMap<String, HandoffArtifact> =
-        serde_json::from_str(&state.handoff_artifacts).unwrap_or_default();
-    let mut prompt_additions = Vec::new();
-    if let Some(artifact) = handoff_artifacts.get(&stage_id) {
-        append_handoff_prompt_additions(
-            &mut prompt_additions,
-            artifact,
-            "Approved plan",
-            "Review summary",
-        );
-    }
+async fn start_stage_and_persist_state(
+    deployment: &DeploymentImpl,
+    pool: &SqlitePool,
+    workspace: &Workspace,
+    state: &PipelineState,
+    config: &PipelineConfig,
+    stage_id: &str,
+    stage_config: &StageConfig,
+    prompt_additions: &[String],
+    saved_approval_stage_id: &str,
+    saved_approval_payload: &str,
+) -> Result<ResponseJson<ApiResponse<PipelineStatusResponse>>, ApiError> {
+    let role_sessions: HashMap<String, String> =
+        serde_json::from_str(&state.role_sessions).unwrap_or_default();
+    let (session_id, is_follow_up) = resolve_stage_session(&role_sessions, &stage_config.role);
 
-    // Start the approved stage.
-    let _started = match pipeline_executor::start_pipeline_stage(
+    let started = match pipeline_executor::start_pipeline_stage(
         deployment.container(),
         pool,
-        &workspace,
-        &state,
-        &stage_id,
+        workspace,
+        state,
+        stage_id,
         &stage_config.role,
         &stage_config.agent,
         session_id,
-        &prompt_additions,
+        prompt_additions,
         is_follow_up,
     )
     .await
     {
         Ok(started) => started,
         Err(e) => {
-            tracing::error!("Failed to start approved pipeline stage: {}", e);
-            // Rollback: restore approval state so user can retry.
+            tracing::error!("Failed to start pipeline stage '{}': {}", stage_id, e);
             let _ = PipelineState::restore_approval(
                 pool,
                 workspace.id,
-                &saved_approval_stage_id,
-                &saved_approval_payload,
+                saved_approval_stage_id,
+                saved_approval_payload,
             )
             .await;
             return Err(ApiError::BadRequest(format!(
@@ -343,17 +378,15 @@ pub async fn approve_pipeline(
         }
     };
 
-    // Update role_sessions with the new session.
     let mut role_sessions_updated = role_sessions;
-    role_sessions_updated.insert(stage_config.role.clone(), _started.session_id.to_string());
+    role_sessions_updated.insert(stage_config.role.clone(), started.session_id.to_string());
     let role_sessions_json = serde_json::to_string(&role_sessions_updated).unwrap_or_default();
 
-    // Update the pipeline state to reflect the new stage is running.
     if let Err(e) = PipelineState::update_stage(
         pool,
         workspace.id,
-        &stage_id,
-        "running",
+        stage_id,
+        PipelineStatus::Running.as_str(),
         &state.retry_counts,
         &state.stage_history,
         &state.handoff_artifacts,
@@ -361,14 +394,18 @@ pub async fn approve_pipeline(
     )
     .await
     {
-        tracing::error!("Failed to update pipeline state after approval: {}", e);
+        tracing::error!(
+            "Failed to update pipeline state for stage '{}': {}",
+            stage_id,
+            e
+        );
         rollback_started_stage(
             deployment.container(),
             pool,
-            &workspace,
-            _started.execution_process_id,
-            &saved_approval_stage_id,
-            &saved_approval_payload,
+            workspace,
+            started.execution_process_id,
+            saved_approval_stage_id,
+            saved_approval_payload,
         )
         .await;
         return Err(ApiError::BadRequest(
@@ -376,15 +413,59 @@ pub async fn approve_pipeline(
         ));
     }
 
-    // Re-read the updated state.
-    let updated_state = PipelineState::find_by_workspace_id(pool, workspace.id)
-        .await?
-        .ok_or_else(|| ApiError::BadRequest("Pipeline state not found after update".to_string()))?;
+    fetch_updated_status_response(pool, workspace.id, config).await
+}
 
-    Ok(ResponseJson(ApiResponse::success(build_status_response(
-        &updated_state,
+// ── GET /status ────────────────────────────────────────────────────
+
+pub async fn get_pipeline_status(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<PipelineStatusResponse>>, ApiError> {
+    let pool = &deployment.db().pool;
+    let context = load_pipeline_context(pool, workspace.id).await?;
+    Ok(success_status_response::<PipelineStatusResponse>(
+        &context.state,
+        &context.config,
+    ))
+}
+
+// ── POST /approve ──────────────────────────────────────────────────
+
+pub async fn approve_pipeline(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<PipelineStatusResponse>>, ApiError> {
+    let pool = &deployment.db().pool;
+    let LoadedPipelineContext { state, config } = load_pipeline_context(pool, workspace.id).await?;
+    require_awaiting_approval(&state)?;
+    let approval = build_approval_context(&state);
+    let stage_config = find_stage_config(&config, &approval.stage_id)?;
+
+    clear_approval_flag(pool, workspace.id).await?;
+
+    let handoff_artifacts: HashMap<String, HandoffArtifact> =
+        serde_json::from_str(&state.handoff_artifacts).unwrap_or_default();
+    let prompt_additions = build_stage_prompt_additions(
+        None,
+        handoff_artifacts.get(&approval.stage_id),
+        "Approved plan",
+        "Review summary",
+    );
+
+    start_stage_and_persist_state(
+        &deployment,
+        pool,
+        &workspace,
+        &state,
         &config,
-    ))))
+        &approval.stage_id,
+        stage_config,
+        &prompt_additions,
+        &approval.saved_stage_id,
+        &approval.saved_payload,
+    )
+    .await
 }
 
 // ── POST /reject ───────────────────────────────────────────────────
@@ -395,66 +476,30 @@ pub async fn reject_pipeline(
     ResponseJson(payload): ResponseJson<RejectRequest>,
 ) -> Result<ResponseJson<ApiResponse<PipelineStatusResponse>>, ApiError> {
     let pool = &deployment.db().pool;
+    let LoadedPipelineContext { state, config } = load_pipeline_context(pool, workspace.id).await?;
+    require_awaiting_approval(&state)?;
+    let approval = build_approval_context(&state);
+    let rejection_target = resolve_rejection_target(&config, &approval.stage_id)?;
 
-    let state = PipelineState::find_by_workspace_id(pool, workspace.id)
-        .await?
-        .ok_or_else(|| {
-            ApiError::BadRequest("No pipeline configured for this workspace".to_string())
-        })?;
-
-    if !state.awaiting_approval {
-        return Err(ApiError::BadRequest(
-            "Pipeline is not awaiting approval".to_string(),
-        ));
-    }
-
-    let config: PipelineConfig = serde_json::from_str(&state.pipeline_config).map_err(|e| {
-        tracing::error!("Failed to parse pipeline config: {}", e);
-        ApiError::BadRequest("Invalid pipeline configuration".to_string())
-    })?;
-
-    // Use approval_stage_id to find the stage that was about to be approved.
-    // The rejection should go to the stage that PRODUCED the output being rejected,
-    // which is the stage before approval_stage_id. Find it by looking at which stage
-    // has on_success == approval_stage_id, then use that stage's on_fail for routing.
-    let approval_stage_id = state
-        .approval_stage_id
-        .clone()
-        .unwrap_or_else(|| state.current_stage_id.clone());
-
-    // Save approval info before clearing, so we can restore on failure.
-    let saved_approval_stage_id = state
-        .approval_stage_id
-        .clone()
-        .unwrap_or_else(|| approval_stage_id.clone());
-    let saved_approval_payload = state
-        .approval_payload
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({ "stage_id": approval_stage_id }).to_string());
-
-    let rejection_target = resolve_rejection_target(&config, &approval_stage_id)?;
-
-    // Clear approval.
-    PipelineState::clear_approval(pool, workspace.id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to clear approval: {}", e);
-            ApiError::BadRequest("Failed to clear approval".to_string())
-        })?;
+    clear_approval_flag(pool, workspace.id).await?;
 
     if matches!(rejection_target, ApprovalRejectionTarget::Pause) {
-        if let Err(e) = PipelineState::set_status(pool, workspace.id, "paused").await {
-            tracing::error!("Failed to pause rejected pipeline: {}", e);
+        if let Err(err) = set_pipeline_status(
+            pool,
+            workspace.id,
+            PipelineStatus::Paused,
+            "Failed to pause pipeline after rejection",
+        )
+        .await
+        {
             let _ = PipelineState::restore_approval(
                 pool,
                 workspace.id,
-                &saved_approval_stage_id,
-                &saved_approval_payload,
+                &approval.saved_stage_id,
+                &approval.saved_payload,
             )
             .await;
-            return Err(ApiError::BadRequest(
-                "Failed to pause pipeline after rejection".to_string(),
-            ));
+            return Err(err);
         }
 
         let updated_state = PipelineState::find_by_workspace_id(pool, workspace.id)
@@ -463,116 +508,38 @@ pub async fn reject_pipeline(
                 ApiError::BadRequest("Pipeline state not found after update".to_string())
             })?;
 
-        return Ok(ResponseJson(ApiResponse::success(build_status_response(
+        return Ok(success_status_response::<PipelineStatusResponse>(
             &updated_state,
             &config,
-        ))));
+        ));
     }
 
     let ApprovalRejectionTarget::Stage(fail_stage) = rejection_target else {
         unreachable!("pause handled above");
     };
 
-    // Build prompt additions including rejection feedback AND existing handoff context.
-    let mut prompt_additions = Vec::new();
-    if let Some(ref feedback) = payload.feedback {
-        prompt_additions.push(format!("Human reviewer feedback (rejection): {}", feedback));
-    }
-
-    // Include any existing handoff context for the target stage.
     let handoff_artifacts: HashMap<String, HandoffArtifact> =
         serde_json::from_str(&state.handoff_artifacts).unwrap_or_default();
-    if let Some(artifact) = handoff_artifacts.get(&fail_stage.id) {
-        append_handoff_prompt_additions(
-            &mut prompt_additions,
-            artifact,
-            "Previous plan",
-            "Previous review summary",
-        );
-    }
+    let prompt_additions = build_stage_prompt_additions(
+        payload.feedback.as_deref(),
+        handoff_artifacts.get(&fail_stage.id),
+        "Previous plan",
+        "Previous review summary",
+    );
 
-    // Look up existing session for the fail stage's role.
-    let role_sessions: HashMap<String, String> =
-        serde_json::from_str(&state.role_sessions).unwrap_or_default();
-    let session_id = role_sessions
-        .get(&fail_stage.role)
-        .and_then(|s| Uuid::parse_str(s).ok());
-    let is_follow_up = session_id.is_some();
-
-    // Start the on_fail stage.
-    let started = match pipeline_executor::start_pipeline_stage(
-        deployment.container(),
+    start_stage_and_persist_state(
+        &deployment,
         pool,
         &workspace,
         &state,
-        &fail_stage.id,
-        &fail_stage.role,
-        &fail_stage.agent,
-        session_id,
-        &prompt_additions,
-        is_follow_up,
-    )
-    .await
-    {
-        Ok(started) => started,
-        Err(e) => {
-            tracing::error!("Failed to start rejected pipeline stage: {}", e);
-            // Rollback: restore approval state so user can retry.
-            let _ = PipelineState::restore_approval(
-                pool,
-                workspace.id,
-                &saved_approval_stage_id,
-                &saved_approval_payload,
-            )
-            .await;
-            return Err(ApiError::BadRequest(format!(
-                "Failed to start pipeline stage: {}",
-                e
-            )));
-        }
-    };
-
-    // Update role_sessions.
-    let mut role_sessions_updated = role_sessions;
-    role_sessions_updated.insert(fail_stage.role.clone(), started.session_id.to_string());
-    let role_sessions_json = serde_json::to_string(&role_sessions_updated).unwrap_or_default();
-
-    // Persist updated state.
-    if let Err(e) = PipelineState::update_stage(
-        pool,
-        workspace.id,
-        &fail_stage.id,
-        "running",
-        &state.retry_counts,
-        &state.stage_history,
-        &state.handoff_artifacts,
-        &role_sessions_json,
-    )
-    .await
-    {
-        tracing::error!("Failed to update pipeline state after rejection: {}", e);
-        rollback_started_stage(
-            deployment.container(),
-            pool,
-            &workspace,
-            started.execution_process_id,
-            &saved_approval_stage_id,
-            &saved_approval_payload,
-        )
-        .await;
-        return Err(ApiError::BadRequest(
-            "Failed to update pipeline state".to_string(),
-        ));
-    }
-
-    let updated_state = PipelineState::find_by_workspace_id(pool, workspace.id)
-        .await?
-        .ok_or_else(|| ApiError::BadRequest("Pipeline state not found after update".to_string()))?;
-
-    Ok(ResponseJson(ApiResponse::success(build_status_response(
-        &updated_state,
         &config,
-    ))))
+        &fail_stage.id,
+        &fail_stage,
+        &prompt_additions,
+        &approval.saved_stage_id,
+        &approval.saved_payload,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -674,6 +641,69 @@ mod tests {
         assert!(combined.contains("Outstanding issues:\n- src/lib.rs:10: handle timeout"));
         assert!(combined.contains("Test report:\n2 passed"));
     }
+
+    #[test]
+    fn test_build_stage_prompt_additions_prepends_feedback() {
+        let artifact = HandoffArtifact {
+            from_stage: "reviewer".to_string(),
+            to_stage: "builder".to_string(),
+            final_plan: Some("implement feature".to_string()),
+            review_summary: Some("looks good".to_string()),
+            constraints: vec!["keep api stable".to_string()],
+            risks: vec![],
+            acceptance_criteria: vec![],
+            issues: vec![],
+            test_report: None,
+        };
+
+        let additions = build_stage_prompt_additions(
+            Some("please tighten the naming"),
+            Some(&artifact),
+            "Approved plan",
+            "Review summary",
+        );
+
+        assert_eq!(
+            additions.first().map(String::as_str),
+            Some("Human reviewer feedback: please tighten the naming")
+        );
+        assert!(
+            additions
+                .iter()
+                .any(|line| line.contains("Approved plan:\nimplement feature"))
+        );
+        assert!(
+            additions
+                .iter()
+                .any(|line| line.contains("Review summary: looks good"))
+        );
+    }
+
+    #[test]
+    fn test_build_approval_context_prefers_saved_state_values() {
+        let state = PipelineState {
+            id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            pipeline_config: "{}".to_string(),
+            current_stage_id: "builder".to_string(),
+            status: "paused".to_string(),
+            retry_counts: "{}".to_string(),
+            stage_history: "[]".to_string(),
+            handoff_artifacts: "{}".to_string(),
+            role_sessions: "{}".to_string(),
+            awaiting_approval: true,
+            approval_stage_id: Some("reviewer".to_string()),
+            approval_payload: Some("{\"stage_id\":\"reviewer\"}".to_string()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let context = build_approval_context(&state);
+
+        assert_eq!(context.stage_id, "reviewer");
+        assert_eq!(context.saved_stage_id, "reviewer");
+        assert_eq!(context.saved_payload, "{\"stage_id\":\"reviewer\"}");
+    }
 }
 
 // ── POST /pause ────────────────────────────────────────────────────
@@ -683,18 +713,15 @@ pub async fn pause_pipeline(
     State(deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<PipelineStatusResponse, PipelineApiError>>, ApiError> {
     let pool = &deployment.db().pool;
+    let LoadedPipelineContext { state, config } = load_pipeline_context(pool, workspace.id).await?;
 
-    let state = PipelineState::find_by_workspace_id(pool, workspace.id)
-        .await?
-        .ok_or_else(|| {
-            ApiError::BadRequest("No pipeline configured for this workspace".to_string())
-        })?;
-
-    if state.status == "completed"
-        || state.status == "failed"
-        || state.status == "ready_for_pr"
-        || state.status == "paused"
-    {
+    if matches!(
+        state.status.parse::<PipelineStatus>(),
+        Ok(PipelineStatus::Completed)
+            | Ok(PipelineStatus::Failed)
+            | Ok(PipelineStatus::ReadyForPr)
+            | Ok(PipelineStatus::Paused)
+    ) {
         return Ok(ResponseJson(ApiResponse::error_with_data(
             PipelineApiError::InvalidState {
                 message: "Cannot pause pipeline in current state".to_string(),
@@ -702,24 +729,20 @@ pub async fn pause_pipeline(
         )));
     }
 
-    let config: PipelineConfig = serde_json::from_str(&state.pipeline_config).map_err(|e| {
-        tracing::error!("Failed to parse pipeline config: {}", e);
-        ApiError::BadRequest("Invalid pipeline configuration".to_string())
-    })?;
-
-    PipelineState::set_status(pool, workspace.id, "paused")
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to pause pipeline: {}", e);
-            ApiError::BadRequest("Failed to pause pipeline".to_string())
-        })?;
+    set_pipeline_status(
+        pool,
+        workspace.id,
+        PipelineStatus::Paused,
+        "Failed to pause pipeline",
+    )
+    .await?;
 
     let updated_state = PipelineState::find_by_workspace_id(pool, workspace.id)
         .await?
         .ok_or_else(|| ApiError::BadRequest("Pipeline state not found after update".to_string()))?;
 
-    Ok(ResponseJson(ApiResponse::success(build_status_response(
+    Ok(success_status_response::<PipelineApiError>(
         &updated_state,
         &config,
-    ))))
+    ))
 }

@@ -51,6 +51,7 @@ use services::services::{
     pipeline_controller::{PipelineController, TransitionAction},
     pipeline_executor,
     pipeline_pr::{self, AutoPrOutcome},
+    pipeline_types::PipelineStatus,
     queued_message::QueuedMessageService,
     remote_client::RemoteClient,
     remote_sync, verdict_parser,
@@ -240,6 +241,244 @@ impl LocalContainerService {
     async fn take_exit_monitor_handle(&self, id: &Uuid) -> Option<JoinHandle<()>> {
         let mut map = self.exit_monitor_handles.write().await;
         map.remove(id)
+    }
+
+    fn should_start_next_after_commit(
+        run_reason: &ExecutionProcessRunReason,
+        changes_committed: bool,
+        has_commits_from_execution: bool,
+    ) -> bool {
+        if matches!(run_reason, ExecutionProcessRunReason::CodingAgent) {
+            changes_committed || has_commits_from_execution
+        } else {
+            true
+        }
+    }
+
+    fn derive_pipeline_pr_body(summary: Option<&str>) -> Option<String> {
+        summary.map(|summary| {
+            verdict_parser::parse_verdict(summary)
+                .map(|verdict| verdict.summary)
+                .unwrap_or_else(|| summary.to_string())
+        })
+    }
+
+    async fn handle_pipeline_start_stage(
+        &self,
+        ctx: &ExecutionContext,
+        stage_id: String,
+        role: String,
+        agent: String,
+        session_id: Option<Uuid>,
+        prompt_additions: Vec<String>,
+        is_follow_up: bool,
+    ) {
+        tracing::info!(
+            "Pipeline transition: {} -> {} (agent: {})",
+            ctx.execution_process.id,
+            stage_id,
+            agent
+        );
+
+        if let Ok(Some(pipeline_state)) =
+            PipelineState::find_by_workspace_id(&self.db.pool, ctx.workspace.id).await
+        {
+            match pipeline_executor::start_pipeline_stage(
+                self,
+                &self.db.pool,
+                &ctx.workspace,
+                &pipeline_state,
+                &stage_id,
+                &role,
+                &agent,
+                session_id,
+                &prompt_additions,
+                is_follow_up,
+            )
+            .await
+            {
+                Ok(started) => {
+                    tracing::info!(
+                        "Pipeline stage '{}' started: exec={}, session={}",
+                        stage_id,
+                        started.execution_process_id,
+                        started.session_id
+                    );
+
+                    if let Ok(Some(fresh_state)) =
+                        PipelineState::find_by_workspace_id(&self.db.pool, ctx.workspace.id).await
+                    {
+                        let mut role_sessions: HashMap<String, String> =
+                            serde_json::from_str(&fresh_state.role_sessions).unwrap_or_default();
+                        role_sessions.insert(role, started.session_id.to_string());
+
+                        if let Err(e) = PipelineState::update_stage(
+                            &self.db.pool,
+                            ctx.workspace.id,
+                            &fresh_state.current_stage_id,
+                            &fresh_state.status,
+                            &fresh_state.retry_counts,
+                            &fresh_state.stage_history,
+                            &fresh_state.handoff_artifacts,
+                            &serde_json::to_string(&role_sessions).unwrap_or_default(),
+                        )
+                        .await
+                        {
+                            tracing::error!("Failed to update pipeline role_sessions: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to start pipeline stage '{}': {}", stage_id, e);
+                    let _ = PipelineState::set_status(
+                        &self.db.pool,
+                        ctx.workspace.id,
+                        PipelineStatus::Paused.as_str(),
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    async fn handle_pipeline_ready_for_pr(&self, ctx: &ExecutionContext) {
+        tracing::info!("Pipeline ready for PR for workspace {}", ctx.workspace.id);
+
+        let default_title = ctx
+            .workspace
+            .name
+            .clone()
+            .unwrap_or_else(|| ctx.workspace.branch.clone());
+        let pr_body =
+            CodingAgentTurn::find_by_execution_process_id(&self.db.pool, ctx.execution_process.id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|turn| turn.summary)
+                .as_deref()
+                .and_then(|summary| Self::derive_pipeline_pr_body(Some(summary)));
+
+        match pipeline_pr::try_auto_create_pr(
+            self,
+            &ctx.workspace,
+            &default_title,
+            pr_body.as_deref(),
+        )
+        .await
+        {
+            Ok(AutoPrOutcome::Created { url }) => {
+                self.notification_service()
+                    .notify(
+                        "Pipeline PR Created",
+                        &format!("Pull Request created: {}", url),
+                        Some(ctx.workspace.id),
+                    )
+                    .await;
+            }
+            Ok(AutoPrOutcome::Skipped { reason }) => {
+                self.notification_service()
+                    .notify(
+                        "Pipeline Ready for PR",
+                        &format!("All stages passed. Auto-create PR skipped: {}", reason),
+                        Some(ctx.workspace.id),
+                    )
+                    .await;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to auto-create PR for workspace {}: {}",
+                    ctx.workspace.id,
+                    e
+                );
+                self.notification_service()
+                    .notify(
+                        "Pipeline Ready for PR",
+                        &format!("All stages passed, but auto-create PR failed: {}", e),
+                        Some(ctx.workspace.id),
+                    )
+                    .await;
+            }
+        }
+    }
+
+    async fn handle_pipeline_transition_after_completion(&self, ctx: &ExecutionContext) -> bool {
+        match PipelineController::handle_stage_completed(&self.db.pool, ctx).await {
+            Ok(TransitionAction::NoPipeline) => {
+                if let Err(e) = self.try_start_next_action(ctx).await {
+                    tracing::error!("Failed to start next action after completion: {}", e);
+                }
+                false
+            }
+            Ok(TransitionAction::StartStage {
+                stage_id,
+                role,
+                agent,
+                session_id,
+                prompt_additions,
+                is_follow_up,
+            }) => {
+                self.handle_pipeline_start_stage(
+                    ctx,
+                    stage_id,
+                    role,
+                    agent,
+                    session_id,
+                    prompt_additions,
+                    is_follow_up,
+                )
+                .await;
+                false
+            }
+            Ok(TransitionAction::AwaitApproval { stage_id }) => {
+                tracing::info!("Pipeline awaiting approval for stage: {}", stage_id);
+                self.notification_service()
+                    .notify(
+                        "Pipeline Approval Required",
+                        &format!("Stage '{}' is waiting for your approval", stage_id),
+                        Some(ctx.workspace.id),
+                    )
+                    .await;
+                false
+            }
+            Ok(TransitionAction::Completed) => {
+                tracing::info!("Pipeline completed for workspace {}", ctx.workspace.id);
+                self.notification_service()
+                    .notify(
+                        "Pipeline Complete",
+                        "All stages finished successfully",
+                        Some(ctx.workspace.id),
+                    )
+                    .await;
+                self.finalize_task(ctx).await;
+                true
+            }
+            Ok(TransitionAction::ReadyForPr) => {
+                self.handle_pipeline_ready_for_pr(ctx).await;
+                false
+            }
+            Ok(TransitionAction::Paused { reason }) => {
+                tracing::warn!(
+                    "Pipeline paused for workspace {}: {}",
+                    ctx.workspace.id,
+                    reason
+                );
+                self.notification_service()
+                    .notify("Pipeline Paused", &reason, Some(ctx.workspace.id))
+                    .await;
+                false
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Pipeline controller error for workspace {}: {}",
+                    ctx.workspace.id,
+                    e
+                );
+                if let Err(e) = self.try_start_next_action(ctx).await {
+                    tracing::error!("Failed to start next action after completion: {}", e);
+                }
+                false
+            }
+        }
     }
 
     async fn cleanup_workspace(&self, workspace: &Workspace) {
@@ -582,264 +821,27 @@ impl LocalContainerService {
                         }
                     };
 
-                    let should_start_next = if matches!(
+                    let has_commits_from_execution = if matches!(
                         ctx.execution_process.run_reason,
                         ExecutionProcessRunReason::CodingAgent
                     ) {
-                        // Check if agent made commits OR if we just committed uncommitted changes
-                        changes_committed
-                            || container
-                                .has_commits_from_execution(&ctx)
-                                .await
-                                .unwrap_or(false)
+                        container
+                            .has_commits_from_execution(&ctx)
+                            .await
+                            .unwrap_or(false)
                     } else {
-                        true
+                        false
                     };
+                    let should_start_next = LocalContainerService::should_start_next_after_commit(
+                        &ctx.execution_process.run_reason,
+                        changes_committed,
+                        has_commits_from_execution,
+                    );
 
                     if should_start_next {
-                        // Check if this workspace has an active pipeline
-                        match PipelineController::handle_stage_completed(&db.pool, &ctx).await {
-                            Ok(TransitionAction::NoPipeline) => {
-                                // No pipeline — fall through to existing behavior
-                                if let Err(e) = container.try_start_next_action(&ctx).await {
-                                    tracing::error!(
-                                        "Failed to start next action after completion: {}",
-                                        e
-                                    );
-                                }
-                            }
-                            Ok(TransitionAction::StartStage {
-                                stage_id,
-                                role,
-                                agent,
-                                session_id,
-                                prompt_additions,
-                                is_follow_up,
-                            }) => {
-                                tracing::info!(
-                                    "Pipeline transition: {} -> {} (agent: {})",
-                                    ctx.execution_process.id,
-                                    stage_id,
-                                    agent
-                                );
-                                // Load pipeline state and start the next stage
-                                if let Ok(Some(pipeline_state)) =
-                                    PipelineState::find_by_workspace_id(&db.pool, ctx.workspace.id)
-                                        .await
-                                {
-                                    match pipeline_executor::start_pipeline_stage(
-                                        &container,
-                                        &db.pool,
-                                        &ctx.workspace,
-                                        &pipeline_state,
-                                        &stage_id,
-                                        &role,
-                                        &agent,
-                                        session_id,
-                                        &prompt_additions,
-                                        is_follow_up,
-                                    )
-                                    .await
-                                    {
-                                        Ok(started) => {
-                                            tracing::info!(
-                                                "Pipeline stage '{}' started: exec={}, session={}",
-                                                stage_id,
-                                                started.execution_process_id,
-                                                started.session_id
-                                            );
-                                            // Re-read fresh state from DB (controller already updated
-                                            // retry_counts, stage_history, handoff_artifacts, current_stage_id)
-                                            // — only merge the new role_sessions to avoid overwriting with stale data.
-                                            if let Ok(Some(fresh_state)) =
-                                                PipelineState::find_by_workspace_id(
-                                                    &db.pool,
-                                                    ctx.workspace.id,
-                                                )
-                                                .await
-                                            {
-                                                let mut role_sessions: std::collections::HashMap<
-                                                    String,
-                                                    String,
-                                                > = serde_json::from_str(
-                                                    &fresh_state.role_sessions,
-                                                )
-                                                .unwrap_or_default();
-                                                role_sessions.insert(
-                                                    role.clone(),
-                                                    started.session_id.to_string(),
-                                                );
-                                                if let Err(e) = PipelineState::update_stage(
-                                                    &db.pool,
-                                                    ctx.workspace.id,
-                                                    &fresh_state.current_stage_id,
-                                                    &fresh_state.status,
-                                                    &fresh_state.retry_counts,
-                                                    &fresh_state.stage_history,
-                                                    &fresh_state.handoff_artifacts,
-                                                    &serde_json::to_string(&role_sessions)
-                                                        .unwrap_or_default(),
-                                                )
-                                                .await
-                                                {
-                                                    tracing::error!(
-                                                        "Failed to update pipeline role_sessions: {}",
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(
-                                                "Failed to start pipeline stage '{}': {}",
-                                                stage_id,
-                                                e
-                                            );
-                                            // Rollback: set pipeline to paused
-                                            let _ = PipelineState::set_status(
-                                                &db.pool,
-                                                ctx.workspace.id,
-                                                "paused",
-                                            )
-                                            .await;
-                                        }
-                                    }
-                                }
-                            }
-                            Ok(TransitionAction::AwaitApproval { stage_id }) => {
-                                tracing::info!(
-                                    "Pipeline awaiting approval for stage: {}",
-                                    stage_id
-                                );
-                                container
-                                    .notification_service()
-                                    .notify(
-                                        "Pipeline Approval Required",
-                                        &format!(
-                                            "Stage '{}' is waiting for your approval",
-                                            stage_id
-                                        ),
-                                        Some(ctx.workspace.id),
-                                    )
-                                    .await;
-                            }
-                            Ok(TransitionAction::Completed) => {
-                                tracing::info!(
-                                    "Pipeline completed for workspace {}",
-                                    ctx.workspace.id
-                                );
-                                container
-                                    .notification_service()
-                                    .notify(
-                                        "Pipeline Complete",
-                                        "All stages finished successfully",
-                                        Some(ctx.workspace.id),
-                                    )
-                                    .await;
-                                container.finalize_task(&ctx).await;
-                                already_finalized = true;
-                            }
-                            Ok(TransitionAction::ReadyForPr) => {
-                                tracing::info!(
-                                    "Pipeline ready for PR for workspace {}",
-                                    ctx.workspace.id
-                                );
-                                let default_title = ctx
-                                    .workspace
-                                    .name
-                                    .clone()
-                                    .unwrap_or_else(|| ctx.workspace.branch.clone());
-                                let pr_body = CodingAgentTurn::find_by_execution_process_id(
-                                    &db.pool,
-                                    ctx.execution_process.id,
-                                )
-                                .await
-                                .ok()
-                                .flatten()
-                                .and_then(|turn| turn.summary)
-                                .map(|summary| {
-                                    verdict_parser::parse_verdict(&summary)
-                                        .map(|verdict| verdict.summary)
-                                        .unwrap_or(summary)
-                                });
-
-                                match pipeline_pr::try_auto_create_pr(
-                                    &container,
-                                    &ctx.workspace,
-                                    &default_title,
-                                    pr_body.as_deref(),
-                                )
-                                .await
-                                {
-                                    Ok(AutoPrOutcome::Created { url }) => {
-                                        container
-                                            .notification_service()
-                                            .notify(
-                                                "Pipeline PR Created",
-                                                &format!("Pull Request created: {}", url),
-                                                Some(ctx.workspace.id),
-                                            )
-                                            .await;
-                                    }
-                                    Ok(AutoPrOutcome::Skipped { reason }) => {
-                                        container
-                                            .notification_service()
-                                            .notify(
-                                                "Pipeline Ready for PR",
-                                                &format!(
-                                                    "All stages passed. Auto-create PR skipped: {}",
-                                                    reason
-                                                ),
-                                                Some(ctx.workspace.id),
-                                            )
-                                            .await;
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "Failed to auto-create PR for workspace {}: {}",
-                                            ctx.workspace.id,
-                                            e
-                                        );
-                                        container
-                                            .notification_service()
-                                            .notify(
-                                                "Pipeline Ready for PR",
-                                                &format!(
-                                                    "All stages passed, but auto-create PR failed: {}",
-                                                    e
-                                                ),
-                                                Some(ctx.workspace.id),
-                                            )
-                                            .await;
-                                    }
-                                }
-                            }
-                            Ok(TransitionAction::Paused { reason }) => {
-                                tracing::warn!(
-                                    "Pipeline paused for workspace {}: {}",
-                                    ctx.workspace.id,
-                                    reason
-                                );
-                                container
-                                    .notification_service()
-                                    .notify("Pipeline Paused", &reason, Some(ctx.workspace.id))
-                                    .await;
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    "Pipeline controller error for workspace {}: {}",
-                                    ctx.workspace.id,
-                                    e
-                                );
-                                // Fall through to existing behavior on error
-                                if let Err(e) = container.try_start_next_action(&ctx).await {
-                                    tracing::error!(
-                                        "Failed to start next action after completion: {}",
-                                        e
-                                    );
-                                }
-                            }
-                        }
+                        already_finalized = container
+                            .handle_pipeline_transition_after_completion(&ctx)
+                            .await;
                     } else {
                         tracing::info!(
                             "Skipping cleanup script for workspace {} - no changes made by coding agent",
@@ -1870,5 +1872,62 @@ fn success_exit_status() -> std::process::ExitStatus {
     {
         use std::os::windows::process::ExitStatusExt;
         ExitStatusExt::from_raw(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use db::models::execution_process::ExecutionProcessRunReason;
+
+    use super::LocalContainerService;
+
+    #[test]
+    fn should_start_next_after_commit_for_coding_agent_requires_changes_or_commits() {
+        assert!(!LocalContainerService::should_start_next_after_commit(
+            &ExecutionProcessRunReason::CodingAgent,
+            false,
+            false,
+        ));
+        assert!(LocalContainerService::should_start_next_after_commit(
+            &ExecutionProcessRunReason::CodingAgent,
+            true,
+            false,
+        ));
+        assert!(LocalContainerService::should_start_next_after_commit(
+            &ExecutionProcessRunReason::CodingAgent,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn should_start_next_after_commit_for_non_coding_runs_always_continues() {
+        assert!(LocalContainerService::should_start_next_after_commit(
+            &ExecutionProcessRunReason::CleanupScript,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn derive_pipeline_pr_body_prefers_verdict_summary() {
+        let summary = Some(
+            "Implementation details\n```json\n{\"verdict\":\"approved\",\"summary\":\"ready for merge\",\"issues\":[]}\n```",
+        );
+
+        assert_eq!(
+            LocalContainerService::derive_pipeline_pr_body(summary),
+            Some("ready for merge".to_string())
+        );
+    }
+
+    #[test]
+    fn derive_pipeline_pr_body_falls_back_to_raw_summary() {
+        let summary = Some("plain summary without verdict block");
+
+        assert_eq!(
+            LocalContainerService::derive_pipeline_pr_body(summary),
+            Some("plain summary without verdict block".to_string())
+        );
     }
 }
