@@ -103,6 +103,7 @@ import {
   OpenRemoteWorkspaceInEditorRequest,
   OpenRemoteEditorResponse,
   ProfileResponse,
+  PipelineStatusResponse,
 } from 'shared/types';
 import type { Project as RemoteProject } from 'shared/remote-types';
 import type { WorkspaceWithSession } from '@/shared/types/attempt';
@@ -1736,15 +1737,6 @@ export const searchApi = {
     return handleApiResponse<SearchResult[]>(response);
   },
 };
-
-// Pipeline API
-export interface PipelineStatusResponse {
-  current_stage: string;
-  status: string;
-  awaiting_approval: boolean;
-  stage_count: number;
-  current_stage_index: number;
-}
 
 export const pipelineApi = {
   getStatus: async (workspaceId: string): Promise<PipelineStatusResponse> => {

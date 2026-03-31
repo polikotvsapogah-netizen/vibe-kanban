@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool};
 use thiserror::Error;
 use ts_rs::TS;
 use uuid::Uuid;
@@ -264,15 +264,36 @@ impl PipelineState {
             return Ok(vec![]);
         }
 
-        // SQLx doesn't support dynamic IN lists with compile-time checking,
-        // so we query individually and collect.
-        let mut results = Vec::with_capacity(workspace_ids.len());
-        for id in workspace_ids {
-            if let Some(state) = Self::find_by_workspace_id(pool, *id).await? {
-                results.push(state);
-            }
+        let mut query_builder = QueryBuilder::<Sqlite>::new(
+            r#"SELECT
+                id,
+                workspace_id,
+                pipeline_config,
+                current_stage_id,
+                status,
+                retry_counts,
+                stage_history,
+                handoff_artifacts,
+                role_sessions,
+                awaiting_approval,
+                approval_stage_id,
+                approval_payload,
+                created_at,
+                updated_at
+               FROM pipeline_states
+               WHERE workspace_id IN ("#,
+        );
+
+        let mut separated = query_builder.separated(", ");
+        for workspace_id in workspace_ids {
+            separated.push_bind(workspace_id);
         }
-        Ok(results)
+        separated.push_unseparated(")");
+
+        query_builder
+            .build_query_as::<PipelineState>()
+            .fetch_all(pool)
+            .await
     }
 
     pub async fn delete_by_workspace_id(
@@ -286,5 +307,102 @@ impl PipelineState {
         .execute(pool)
         .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::SqlitePool;
+    use uuid::Uuid;
+
+    use super::{CreatePipelineState, PipelineState};
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            r#"
+            CREATE TABLE pipeline_states (
+                id BLOB PRIMARY KEY,
+                workspace_id BLOB NOT NULL UNIQUE,
+                pipeline_config TEXT NOT NULL,
+                current_stage_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                retry_counts TEXT NOT NULL DEFAULT '{}',
+                stage_history TEXT NOT NULL DEFAULT '[]',
+                handoff_artifacts TEXT NOT NULL DEFAULT '{}',
+                role_sessions TEXT NOT NULL DEFAULT '{}',
+                awaiting_approval INTEGER NOT NULL DEFAULT 0,
+                approval_stage_id TEXT,
+                approval_payload TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn find_by_workspace_ids_returns_all_matching_states_in_one_call() {
+        let pool = test_pool().await;
+
+        let first_workspace_id = Uuid::new_v4();
+        let second_workspace_id = Uuid::new_v4();
+        let missing_workspace_id = Uuid::new_v4();
+
+        PipelineState::create(
+            &pool,
+            &CreatePipelineState {
+                workspace_id: first_workspace_id,
+                pipeline_config: r#"{"name":"a","stages":[]}"#.to_string(),
+                first_stage_id: "planner".to_string(),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+
+        PipelineState::create(
+            &pool,
+            &CreatePipelineState {
+                workspace_id: second_workspace_id,
+                pipeline_config: r#"{"name":"b","stages":[]}"#.to_string(),
+                first_stage_id: "reviewer".to_string(),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+
+        let states = PipelineState::find_by_workspace_ids(
+            &pool,
+            &[
+                second_workspace_id,
+                missing_workspace_id,
+                first_workspace_id,
+            ],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(states.len(), 2);
+        assert!(
+            states
+                .iter()
+                .any(|state| state.workspace_id == first_workspace_id)
+        );
+        assert!(
+            states
+                .iter()
+                .any(|state| state.workspace_id == second_workspace_id)
+        );
+        assert!(
+            !states
+                .iter()
+                .any(|state| state.workspace_id == missing_workspace_id)
+        );
     }
 }

@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{path::PathBuf, str::FromStr};
 
 use anyhow::Result;
 use db::models::{
@@ -16,7 +16,7 @@ use executors::{
         coding_agent_initial::CodingAgentInitialRequest,
         review::{RepoReviewContext, ReviewRequest},
     },
-    executors::BaseCodingAgent,
+    executors::{BaseCodingAgent, build_review_prompt},
     profile::ExecutorConfig,
 };
 use sqlx::SqlitePool;
@@ -122,7 +122,7 @@ pub async fn start_pipeline_stage(
         &effective_policies,
     );
 
-    let prompt = if prompt_additions.is_empty() {
+    let stage_prompt = if prompt_additions.is_empty() {
         role_prompt
     } else {
         format!("{}\n\n{}", role_prompt, prompt_additions.join("\n\n"))
@@ -144,21 +144,8 @@ pub async fn start_pipeline_stage(
         };
 
         // Build review context from workspace repos.
-        let review_context = match WorkspaceRepo::find_repos_for_workspace(pool, workspace.id).await
-        {
-            Ok(repos) if !repos.is_empty() => {
-                let context = repos
-                    .iter()
-                    .map(|repo| RepoReviewContext {
-                        repo_id: repo.id,
-                        repo_name: repo.name.clone(),
-                        base_commit: String::new(), // TODO: get from pipeline_state stage_history first entry
-                    })
-                    .collect::<Vec<_>>();
-                Some(context)
-            }
-            _ => None,
-        };
+        let review_context = build_pipeline_review_context(container, pool, workspace).await?;
+        let prompt = build_pipeline_review_prompt(&stage_prompt, review_context.as_deref());
 
         ExecutorActionType::ReviewRequest(ReviewRequest {
             executor_config,
@@ -172,7 +159,7 @@ pub async fn start_pipeline_stage(
         match agent_session_id_for_follow_up(pool, session.id).await {
             Some(agent_sid) => {
                 ExecutorActionType::CodingAgentFollowUpRequest(CodingAgentFollowUpRequest {
-                    prompt,
+                    prompt: stage_prompt,
                     session_id: agent_sid,
                     reset_to_message_id: None,
                     executor_config,
@@ -182,7 +169,7 @@ pub async fn start_pipeline_stage(
             None => {
                 // No previous agent session — fall back to initial.
                 ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
-                    prompt,
+                    prompt: stage_prompt,
                     executor_config,
                     working_dir: None,
                 })
@@ -190,7 +177,7 @@ pub async fn start_pipeline_stage(
         }
     } else {
         ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
-            prompt,
+            prompt: stage_prompt,
             executor_config,
             working_dir: None,
         })
@@ -240,6 +227,50 @@ fn parse_agent_name(agent: &str) -> Result<BaseCodingAgent, PipelineExecutorErro
         .map_err(|_| PipelineExecutorError::UnknownAgent(agent.to_string()))
 }
 
+fn build_pipeline_review_prompt(
+    additional_prompt: &str,
+    context: Option<&[RepoReviewContext]>,
+) -> String {
+    build_review_prompt(context, Some(additional_prompt))
+}
+
+async fn build_pipeline_review_context(
+    container: &(impl ContainerService + ?Sized + Sync),
+    pool: &SqlitePool,
+    workspace: &Workspace,
+) -> Result<Option<Vec<RepoReviewContext>>, PipelineExecutorError> {
+    let repos =
+        WorkspaceRepo::find_repos_with_target_branch_for_workspace(pool, workspace.id).await?;
+    if repos.is_empty() {
+        return Ok(None);
+    }
+
+    let container_ref = container.ensure_container_exists(workspace).await?;
+    let workspace_path = PathBuf::from(container_ref.as_str());
+
+    let mut contexts = Vec::new();
+    for repo in repos {
+        let worktree_path = workspace_path.join(&repo.repo.name);
+        if let Ok(base_commit) =
+            container
+                .git()
+                .get_fork_point(&worktree_path, &repo.target_branch, &workspace.branch)
+        {
+            contexts.push(RepoReviewContext {
+                repo_id: repo.repo.id,
+                repo_name: repo.repo.display_name,
+                base_commit,
+            });
+        }
+    }
+
+    if contexts.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(contexts))
+    }
+}
+
 /// Look up the agent-internal session ID from the most recent
 /// `CodingAgentTurn` for this DB session, so we can build a follow-up request.
 async fn agent_session_id_for_follow_up(pool: &SqlitePool, session_id: Uuid) -> Option<String> {
@@ -248,4 +279,28 @@ async fn agent_session_id_for_follow_up(pool: &SqlitePool, session_id: Uuid) -> 
         .ok()
         .flatten()
         .map(|info| info.session_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_pipeline_review_prompt_includes_repo_context() {
+        let context = vec![RepoReviewContext {
+            repo_id: Uuid::new_v4(),
+            repo_name: "repo-a".to_string(),
+            base_commit: "abc123".to_string(),
+        }];
+
+        let prompt = build_pipeline_review_prompt(
+            "Review all code changes made by the builder.",
+            Some(&context),
+        );
+
+        assert!(prompt.contains("Repository: repo-a"));
+        assert!(prompt.contains("base commit abc123"));
+        assert!(prompt.contains("git diff abc123..HEAD"));
+        assert!(prompt.contains("Review all code changes made by the builder."));
+    }
 }

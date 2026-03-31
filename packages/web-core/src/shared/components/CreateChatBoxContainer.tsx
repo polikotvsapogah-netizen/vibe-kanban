@@ -14,13 +14,12 @@ import {
   toPrettyCase,
   splitMessageToTitleDescription,
 } from '@/shared/lib/string';
-import type { BaseCodingAgent, Repo } from 'shared/types';
+import type { BaseCodingAgent, PipelineConfig, Repo } from 'shared/types';
 import { CreateChatBox } from '@vibe/ui/components/CreateChatBox';
 import { SettingsDialog } from '@/shared/dialogs/settings/SettingsDialog';
 import { CreateModeRepoPickerBar } from './CreateModeRepoPickerBar';
 import { ModelSelectorContainer } from '@/shared/components/ModelSelectorContainer';
 import { PipelineSettings } from '@/shared/components/PipelineSettings';
-import type { PipelineConfig } from '@/shared/components/PipelineSettings';
 
 function getRepoDisplayName(repo: Repo) {
   return repo.display_name || repo.name;

@@ -208,6 +208,24 @@ export type ProviderProfile = { provider: string, username: string | null, displ
 
 export type StatusResponse = { logged_in: boolean, profile: ProfileResponse | null, degraded: boolean | null, };
 
+export type PipelineConfig = { name: string, enable_second_agent: boolean, default_max_retries: number, auto_create_pr: boolean, stages: Array<StageConfig>, };
+
+export type StageConfig = { id: string, role: string, agent: string, approval: string, on_success: string, on_fail: string, max_retries: number | null, escalate_agent: string | null, escalate_after_retries: number | null, workflow_profile: string | null, workflow_mode: string | null, policies: Array<string>, };
+
+export type PipelineStatus = "running" | "paused" | "completed" | "failed" | "ready_for_pr";
+
+export type VerdictStatus = "approved" | "needs_changes" | "failed";
+
+export type VerdictIssue = { file: string | null, line: number | null, description: string, };
+
+export type Verdict = { verdict: VerdictStatus, summary: string, issues: Array<VerdictIssue>, revised_plan: string | null, what_changed: Array<string>, why_changed: Array<string>, unresolved_issues: Array<string>, blockers: Array<string>, non_blockers: Array<string>, missing_steps: Array<string>, risks: Array<string>, suggested_fixes: Array<string>, };
+
+export type HandoffArtifact = { from_stage: string, to_stage: string, final_plan: string | null, review_summary: string | null, constraints: Array<string>, risks: Array<string>, acceptance_criteria: Array<string>, issues: Array<VerdictIssue>, test_report: string | null, };
+
+export type StageHistoryEntry = { stage_id: string, execution_process_id: string, result: string, verdict: Verdict | null, started_at: string, completed_at: string | null, };
+
+export type PipelineStatusResponse = { current_stage: string, status: string, awaiting_approval: boolean, stage_count: number, current_stage_index: number, };
+
 export enum MemberRole { ADMIN = "ADMIN", MEMBER = "MEMBER" }
 
 export enum InvitationStatus { PENDING = "PENDING", ACCEPTED = "ACCEPTED", DECLINED = "DECLINED", EXPIRED = "EXPIRED" }
@@ -412,7 +430,11 @@ export type CreateAndStartWorkspaceRequest = { name: string | null, repos: Array
  */
 pipeline_config: string | null, };
 
-export type CreateAndStartWorkspaceResponse = { workspace: Workspace, execution_process: ExecutionProcess, };
+export type CreateAndStartWorkspaceResponse = { workspace: Workspace, 
+/**
+ * None when the first pipeline stage requires approval before starting.
+ */
+execution_process: ExecutionProcess | null, };
 
 export type UnifiedPrComment = { "comment_type": "general", id: string, author: string, author_association: string | null, body: string, created_at: string, url: string | null, } | { "comment_type": "review", id: bigint, author: string, author_association: string | null, body: string, created_at: string, url: string | null, path: string, line: bigint | null, side: string | null, diff_hunk: string | null, };
 
