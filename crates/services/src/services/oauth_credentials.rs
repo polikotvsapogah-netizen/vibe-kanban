@@ -67,10 +67,14 @@ impl OAuthCredentials {
         Ok(())
     }
 
-    pub async fn clear(&self) -> std::io::Result<()> {
-        let _ = std::fs::remove_file(&self.path);
+    pub async fn clear_session(&self) -> std::io::Result<()> {
         *self.inner.write().await = None;
         Ok(())
+    }
+
+    pub async fn clear_persisted(&self) -> std::io::Result<()> {
+        let _ = std::fs::remove_file(&self.path);
+        self.clear_session().await
     }
 
     pub async fn get(&self) -> Option<Credentials> {
@@ -116,5 +120,62 @@ impl OAuthCredentials {
 
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn test_credentials() -> Credentials {
+        Credentials {
+            access_token: Some("access-token".to_string()),
+            refresh_token: "refresh-token".to_string(),
+            expires_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_session_keeps_credentials_file_on_disk() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("credentials.json");
+        let oauth = OAuthCredentials::new(path.clone());
+        oauth.save(&test_credentials()).await.unwrap();
+
+        oauth.clear_session().await.unwrap();
+
+        assert!(
+            path.exists(),
+            "session clear should not delete credentials file"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "{\n  \"refresh_token\": \"refresh-token\"\n}"
+        );
+        assert!(
+            oauth.get().await.is_none(),
+            "session clear should clear in-memory credentials"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_persisted_removes_credentials_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("credentials.json");
+        let oauth = OAuthCredentials::new(path.clone());
+        oauth.save(&test_credentials()).await.unwrap();
+
+        oauth.clear_persisted().await.unwrap();
+
+        assert!(
+            !path.exists(),
+            "persistent clear should remove credentials file"
+        );
+        assert!(
+            oauth.get().await.is_none(),
+            "persistent clear should clear in-memory credentials"
+        );
     }
 }

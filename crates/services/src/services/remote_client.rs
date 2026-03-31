@@ -233,7 +233,11 @@ impl RemoteClient {
                     updated.access_token.ok_or(RemoteClientError::Auth)
                 }
                 Err(err) if err.is_definitive_auth_failure() => {
-                    let _ = self.auth_context.clear_credentials().await;
+                    tracing::warn!(
+                        ?err,
+                        "definitive auth failure from remote; clearing in-memory credentials but preserving stored refresh token"
+                    );
+                    let _ = self.auth_context.clear_session_credentials().await;
                     self.auth_context.clear_remote_auth_degraded_slug().await;
                     Err(err)
                 }

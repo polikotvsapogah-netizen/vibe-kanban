@@ -428,7 +428,10 @@ impl LocalDeployment {
                 }
             }
             Err(RemoteClientError::Auth) => {
-                let _ = self.auth_context.clear_credentials().await;
+                tracing::warn!(
+                    "remote profile request returned auth failure; clearing in-memory credentials but preserving stored refresh token"
+                );
+                let _ = self.auth_context.clear_session_credentials().await;
                 self.auth_context.clear_profile().await;
                 self.auth_context.clear_remote_auth_degraded_slug().await;
                 LoginStatus::LoggedOut

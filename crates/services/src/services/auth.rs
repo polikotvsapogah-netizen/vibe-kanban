@@ -35,7 +35,11 @@ impl AuthContext {
     }
 
     pub async fn clear_credentials(&self) -> std::io::Result<()> {
-        self.oauth.clear().await
+        self.oauth.clear_persisted().await
+    }
+
+    pub async fn clear_session_credentials(&self) -> std::io::Result<()> {
+        self.oauth.clear_session().await
     }
 
     pub async fn remote_auth_degraded_slug(&self) -> Option<String> {
