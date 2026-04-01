@@ -103,6 +103,7 @@ import {
   OpenRemoteWorkspaceInEditorRequest,
   OpenRemoteEditorResponse,
   ProfileResponse,
+  PipelineStatusResponse,
 } from 'shared/types';
 import type { Project as RemoteProject } from 'shared/remote-types';
 import type { WorkspaceWithSession } from '@/shared/types/attempt';
@@ -1734,5 +1735,44 @@ export const searchApi = {
       options
     );
     return handleApiResponse<SearchResult[]>(response);
+  },
+};
+
+export const pipelineApi = {
+  getStatus: async (workspaceId: string): Promise<PipelineStatusResponse> => {
+    const response = await makeRequest(
+      `/api/workspaces/${workspaceId}/pipeline/status`
+    );
+    return handleApiResponse<PipelineStatusResponse>(response);
+  },
+
+  approve: async (workspaceId: string): Promise<PipelineStatusResponse> => {
+    const response = await makeRequest(
+      `/api/workspaces/${workspaceId}/pipeline/approve`,
+      { method: 'POST' }
+    );
+    return handleApiResponse<PipelineStatusResponse>(response);
+  },
+
+  reject: async (
+    workspaceId: string,
+    feedback?: string
+  ): Promise<PipelineStatusResponse> => {
+    const response = await makeRequest(
+      `/api/workspaces/${workspaceId}/pipeline/reject`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ feedback }),
+      }
+    );
+    return handleApiResponse<PipelineStatusResponse>(response);
+  },
+
+  pause: async (workspaceId: string): Promise<PipelineStatusResponse> => {
+    const response = await makeRequest(
+      `/api/workspaces/${workspaceId}/pipeline/pause`,
+      { method: 'POST' }
+    );
+    return handleApiResponse<PipelineStatusResponse>(response);
   },
 };

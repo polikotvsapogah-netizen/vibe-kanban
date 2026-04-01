@@ -5,11 +5,13 @@ use db::models::{
     coding_agent_turn::CodingAgentTurn,
     execution_process::{ExecutionProcess, ExecutionProcessStatus},
     merge::MergeStatus,
+    pipeline_state::PipelineState,
     pull_request::PullRequest,
     workspace::Workspace,
 };
 use deployment::Deployment;
 use serde::{Deserialize, Serialize};
+use services::services::pipeline_types::PipelineConfig;
 use ts_rs::TS;
 use utils::response::ApiResponse;
 use uuid::Uuid;
@@ -51,6 +53,24 @@ pub struct WorkspaceSummary {
     pub pr_number: Option<i64>,
     /// PR URL for this workspace (if any PR exists)
     pub pr_url: Option<String>,
+    /// Current pipeline stage id (e.g. "builder"), None if no pipeline
+    #[ts(optional)]
+    pub pipeline_stage: Option<String>,
+    /// Pipeline status ("running", "paused", "completed", etc.), None if no pipeline
+    #[ts(optional)]
+    pub pipeline_status: Option<String>,
+    /// 1-based index of the current stage within the pipeline
+    #[ts(optional)]
+    pub pipeline_stage_index: Option<u32>,
+    /// Total number of stages in the pipeline
+    #[ts(optional)]
+    pub pipeline_total_stages: Option<u32>,
+    /// Retry attempt in "current/max" format (e.g. "1/3"), None if no retries
+    #[ts(optional)]
+    pub pipeline_attempt: Option<String>,
+    /// True if the pipeline is currently waiting for human approval
+    #[ts(optional)]
+    pub pipeline_awaiting_approval: Option<bool>,
 }
 
 /// Response containing summaries for requested workspaces
@@ -112,7 +132,15 @@ pub async fn get_workspace_summaries(
     // 6. Get PR status for each workspace
     let pr_statuses = PullRequest::get_latest_for_workspaces(pool, archived).await?;
 
-    // 7. Compute diff stats for each workspace (in parallel)
+    // 7. Get pipeline states for all workspaces
+    let workspace_ids: Vec<Uuid> = workspaces.iter().map(|ws| ws.id).collect();
+    let pipeline_states_vec = PipelineState::find_by_workspace_ids(pool, &workspace_ids).await?;
+    let pipeline_states: HashMap<Uuid, PipelineState> = pipeline_states_vec
+        .into_iter()
+        .map(|ps| (ps.workspace_id, ps))
+        .collect();
+
+    // 9. Compute diff stats for each workspace (in parallel)
     let diff_futures: Vec<_> = workspaces
         .iter()
         .map(|ws| {
@@ -134,7 +162,7 @@ pub async fn get_workspace_summaries(
         futures_util::future::join_all(diff_futures).await;
     let diff_stats: HashMap<Uuid, DiffStats> = diff_results.into_iter().flatten().collect();
 
-    // 8. Assemble response
+    // 10. Assemble response
     let summaries: Vec<WorkspaceSummary> = workspaces
         .iter()
         .map(|ws| {
@@ -144,6 +172,62 @@ pub async fn get_workspace_summaries(
                 .map(|p| pending_approval_eps.contains(&p.execution_process_id))
                 .unwrap_or(false);
             let stats = diff_stats.get(&id);
+
+            // Compute pipeline summary fields from the stored pipeline state.
+            let (
+                pipeline_stage,
+                pipeline_status,
+                pipeline_stage_index,
+                pipeline_total_stages,
+                pipeline_attempt,
+                pipeline_awaiting_approval,
+            ) = if let Some(ps) = pipeline_states.get(&id) {
+                let config: Option<PipelineConfig> = serde_json::from_str(&ps.pipeline_config).ok();
+
+                let (stage_index, total_stages) = if let Some(ref cfg) = config {
+                    let total = cfg.stages.len() as u32;
+                    let index = cfg
+                        .stages
+                        .iter()
+                        .position(|s| s.id == ps.current_stage_id)
+                        .map(|i| i as u32 + 1) // 1-based
+                        .unwrap_or(0);
+                    (Some(index), Some(total))
+                } else {
+                    (None, None)
+                };
+
+                // Build "current/max" attempt string for the current stage.
+                // Always show attempt when pipeline is active: first attempt = "1/3".
+                let attempt_str = if let Some(ref cfg) = config {
+                    let current_stage_config =
+                        cfg.stages.iter().find(|s| s.id == ps.current_stage_id);
+                    let max_retries = current_stage_config
+                        .and_then(|s| s.max_retries)
+                        .unwrap_or(cfg.default_max_retries);
+                    let retry_counts: Option<HashMap<String, u32>> =
+                        serde_json::from_str(&ps.retry_counts).ok();
+                    let current_retry = retry_counts
+                        .and_then(|counts| counts.get(&ps.current_stage_id).copied())
+                        .unwrap_or(0);
+                    // 1-based: first attempt is 1, after first retry is 2, etc.
+                    let current = current_retry + 1;
+                    Some(format!("{}/{}", current, max_retries))
+                } else {
+                    None
+                };
+
+                (
+                    Some(ps.current_stage_id.clone()),
+                    Some(ps.status.clone()),
+                    stage_index,
+                    total_stages,
+                    attempt_str,
+                    Some(ps.awaiting_approval),
+                )
+            } else {
+                (None, None, None, None, None, None)
+            };
 
             WorkspaceSummary {
                 workspace_id: id,
@@ -159,6 +243,12 @@ pub async fn get_workspace_summaries(
                 pr_status: pr_statuses.get(&id).map(|pr| pr.pr_status.clone()),
                 pr_number: pr_statuses.get(&id).map(|pr| pr.pr_number),
                 pr_url: pr_statuses.get(&id).map(|pr| pr.pr_url.clone()),
+                pipeline_stage,
+                pipeline_status,
+                pipeline_stage_index,
+                pipeline_total_stages,
+                pipeline_attempt,
+                pipeline_awaiting_approval,
             }
         })
         .collect();

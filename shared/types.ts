@@ -216,6 +216,24 @@ export type ProviderProfile = { provider: string, username: string | null, displ
 
 export type StatusResponse = { logged_in: boolean, profile: ProfileResponse | null, degraded: boolean | null, };
 
+export type PipelineConfig = { name: string, enable_second_agent: boolean, default_max_retries: number, auto_create_pr: boolean, stages: Array<StageConfig>, };
+
+export type StageConfig = { id: string, role: string, agent: string, approval: string, on_success: string, on_fail: string, max_retries: number | null, escalate_agent: string | null, escalate_after_retries: number | null, workflow_profile: string | null, workflow_mode: string | null, policies: Array<string>, };
+
+export type PipelineStatus = "running" | "paused" | "completed" | "failed" | "ready_for_pr";
+
+export type VerdictStatus = "approved" | "needs_changes" | "failed";
+
+export type VerdictIssue = { file: string | null, line: number | null, description: string, };
+
+export type Verdict = { verdict: VerdictStatus, summary: string, issues: Array<VerdictIssue>, revised_plan: string | null, what_changed: Array<string>, why_changed: Array<string>, unresolved_issues: Array<string>, blockers: Array<string>, non_blockers: Array<string>, missing_steps: Array<string>, risks: Array<string>, suggested_fixes: Array<string>, };
+
+export type HandoffArtifact = { from_stage: string, to_stage: string, final_plan: string | null, review_summary: string | null, constraints: Array<string>, risks: Array<string>, acceptance_criteria: Array<string>, issues: Array<VerdictIssue>, test_report: string | null, };
+
+export type StageHistoryEntry = { stage_id: string, execution_process_id: string, result: string, verdict: Verdict | null, started_at: string, completed_at: string | null, };
+
+export type PipelineStatusResponse = { current_stage: string, status: string, awaiting_approval: boolean, stage_count: number, current_stage_index: number, };
+
 export enum MemberRole { ADMIN = "ADMIN", MEMBER = "MEMBER" }
 
 export enum InvitationStatus { PENDING = "PENDING", ACCEPTED = "ACCEPTED", DECLINED = "DECLINED", EXPIRED = "EXPIRED" }
@@ -412,9 +430,19 @@ export type GetPrCommentsError = { "type": "no_pr_attached" } | { "type": "cli_n
 
 export type GetPrCommentsQuery = { repo_id: string, };
 
-export type CreateAndStartWorkspaceRequest = { name: string | null, repos: Array<WorkspaceRepoInput>, linked_issue: LinkedIssueInfo | null, executor_config: ExecutorConfig, prompt: string, attachment_ids: Array<string> | null, };
+export type CreateAndStartWorkspaceRequest = { name: string | null, repos: Array<WorkspaceRepoInput>, linked_issue: LinkedIssueInfo | null, executor_config: ExecutorConfig, prompt: string, attachment_ids: Array<string> | null, 
+/**
+ * Optional JSON-serialised PipelineConfig.  When provided the workspace
+ * is initialised with a multi-stage pipeline and the first execution is
+ * treated as the pipeline's first stage.
+ */
+pipeline_config: string | null, };
 
-export type CreateAndStartWorkspaceResponse = { workspace: Workspace, execution_process: ExecutionProcess, };
+export type CreateAndStartWorkspaceResponse = { workspace: Workspace, 
+/**
+ * None when the first pipeline stage requires approval before starting.
+ */
+execution_process: ExecutionProcess | null, };
 
 export type UnifiedPrComment = { "comment_type": "general", id: string, author: string, author_association: string | null, body: string, created_at: string, url: string | null, } | { "comment_type": "review", id: bigint, author: string, author_association: string | null, body: string, created_at: string, url: string | null, path: string, line: bigint | null, side: string | null, diff_hunk: string | null, };
 
@@ -490,7 +518,31 @@ pr_number: bigint | null,
 /**
  * PR URL for this workspace (if any PR exists)
  */
-pr_url: string | null, };
+pr_url: string | null, 
+/**
+ * Current pipeline stage id (e.g. "builder"), None if no pipeline
+ */
+pipeline_stage?: string, 
+/**
+ * Pipeline status ("running", "paused", "completed", etc.), None if no pipeline
+ */
+pipeline_status?: string, 
+/**
+ * 1-based index of the current stage within the pipeline
+ */
+pipeline_stage_index?: number, 
+/**
+ * Total number of stages in the pipeline
+ */
+pipeline_total_stages?: number, 
+/**
+ * Retry attempt in "current/max" format (e.g. "1/3"), None if no retries
+ */
+pipeline_attempt?: string, 
+/**
+ * True if the pipeline is currently waiting for human approval
+ */
+pipeline_awaiting_approval?: boolean, };
 
 export type WorkspaceSummaryResponse = { summaries: Array<WorkspaceSummary>, };
 
@@ -518,7 +570,7 @@ export type GitHubConfig = { pat: string | null, oauth_token: string | null, use
 
 export enum SoundFile { ABSTRACT_SOUND1 = "ABSTRACT_SOUND1", ABSTRACT_SOUND2 = "ABSTRACT_SOUND2", ABSTRACT_SOUND3 = "ABSTRACT_SOUND3", ABSTRACT_SOUND4 = "ABSTRACT_SOUND4", COW_MOOING = "COW_MOOING", FAHHHHH = "FAHHHHH", PHONE_VIBRATION = "PHONE_VIBRATION", ROOSTER = "ROOSTER" }
 
-export type UiLanguage = "BROWSER" | "EN" | "FR" | "JA" | "ES" | "KO" | "ZH_HANS" | "ZH_HANT";
+export type UiLanguage = "BROWSER" | "EN" | "FR" | "JA" | "ES" | "KO" | "RU" | "ZH_HANS" | "ZH_HANT";
 
 export type ShowcaseState = { seen_features: Array<string>, };
 
