@@ -14,11 +14,12 @@ import {
   toPrettyCase,
   splitMessageToTitleDescription,
 } from '@/shared/lib/string';
-import type { BaseCodingAgent, Repo } from 'shared/types';
+import type { BaseCodingAgent, PipelineConfig, Repo } from 'shared/types';
 import { CreateChatBox } from '@vibe/ui/components/CreateChatBox';
 import { SettingsDialog } from '@/shared/dialogs/settings/SettingsDialog';
 import { CreateModeRepoPickerBar } from './CreateModeRepoPickerBar';
 import { ModelSelectorContainer } from '@/shared/components/ModelSelectorContainer';
+import { PipelineSettings } from '@/shared/components/PipelineSettings';
 
 function getRepoDisplayName(repo: Repo) {
   return repo.display_name || repo.name;
@@ -61,6 +62,9 @@ export function CreateChatBoxContainer({
   const { createWorkspace } = useCreateWorkspace();
   const hasSelectedRepos = repos.length > 0;
   const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
+  const [pipelineConfig, setPipelineConfig] = useState<PipelineConfig | null>(
+    null
+  );
   const [hasInitializedStep, setHasInitializedStep] = useState(false);
   const [isSelectingRepos, setIsSelectingRepos] = useState(true);
 
@@ -241,6 +245,7 @@ export function CreateChatBoxContainer({
           }
         : null,
       attachment_ids: getAttachmentIds(),
+      pipeline_config: pipelineConfig ? JSON.stringify(pipelineConfig) : null,
     };
     const linkToIssue = linkedIssue
       ? {
@@ -278,6 +283,7 @@ export function CreateChatBoxContainer({
     clearAttachments,
     clearDraft,
     linkedIssue,
+    pipelineConfig,
   ]);
 
   // Determine error to display
@@ -400,6 +406,13 @@ export function CreateChatBoxContainer({
                         }
                       : null
                   }
+                />
+              </div>
+
+              <div className="w-chat max-w-full">
+                <PipelineSettings
+                  value={pipelineConfig}
+                  onChange={setPipelineConfig}
                 />
               </div>
             </>

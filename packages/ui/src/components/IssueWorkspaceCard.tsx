@@ -12,6 +12,7 @@ import {
 } from '@phosphor-icons/react';
 import { UserAvatar, type UserAvatarUser } from './UserAvatar';
 import { RunningDots } from './RunningDots';
+import { PipelineProgress } from './PipelineProgress';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -43,6 +44,12 @@ export interface WorkspaceWithStats {
   hasUnseenActivity?: boolean;
   latestProcessCompletedAt?: string;
   latestProcessStatus?: 'running' | 'completed' | 'failed' | 'killed';
+  pipelineStage?: string;
+  pipelineStatus?: string;
+  pipelineStageIndex?: number;
+  pipelineTotalStages?: number;
+  pipelineAttempt?: string;
+  pipelineAwaitingApproval?: boolean;
 }
 
 export interface IssueWorkspaceCardProps {
@@ -208,6 +215,18 @@ export function IssueWorkspaceCard({
           )}
         </div>
       </div>
+
+      {/* Pipeline progress */}
+      {workspace.pipelineStage && workspace.pipelineTotalStages && (
+        <PipelineProgress
+          stage={workspace.pipelineStage}
+          status={workspace.pipelineStatus || 'running'}
+          stageIndex={workspace.pipelineStageIndex || 1}
+          totalStages={workspace.pipelineTotalStages}
+          attempt={workspace.pipelineAttempt}
+          awaitingApproval={workspace.pipelineAwaitingApproval}
+        />
+      )}
 
       {/* Row 2: Live status + stats (left), PR buttons (right) */}
       <div className="flex items-center justify-between gap-half min-w-0">

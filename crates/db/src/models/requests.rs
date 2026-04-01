@@ -36,12 +36,17 @@ pub struct CreateAndStartWorkspaceRequest {
     pub executor_config: ExecutorConfig,
     pub prompt: String,
     pub attachment_ids: Option<Vec<Uuid>>,
+    /// Optional JSON-serialised PipelineConfig.  When provided the workspace
+    /// is initialised with a multi-stage pipeline and the first execution is
+    /// treated as the pipeline's first stage.
+    pub pipeline_config: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
 pub struct CreateAndStartWorkspaceResponse {
     pub workspace: Workspace,
-    pub execution_process: ExecutionProcess,
+    /// None when the first pipeline stage requires approval before starting.
+    pub execution_process: Option<ExecutionProcess>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]

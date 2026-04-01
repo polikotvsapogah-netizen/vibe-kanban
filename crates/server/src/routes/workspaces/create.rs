@@ -2,13 +2,16 @@ use std::collections::HashMap;
 
 use axum::{Json, extract::State, response::Json as ResponseJson};
 use db::models::{
+    pipeline_state::{CreatePipelineState, PipelineState},
     requests::{
         CreateAndStartWorkspaceRequest, CreateAndStartWorkspaceResponse, CreateWorkspaceApiRequest,
     },
     workspace::{CreateWorkspace, Workspace},
 };
 use deployment::Deployment;
-use services::services::container::ContainerService;
+use services::services::{
+    container::ContainerService, pipeline_executor, pipeline_types::PipelineConfig,
+};
 use utils::response::ApiResponse;
 use uuid::Uuid;
 
@@ -72,6 +75,23 @@ fn normalize_prompt(prompt: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn build_initial_stage_prompt_additions(prompt: &str) -> Vec<String> {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        vec![]
+    } else {
+        vec![trimmed.to_string()]
+    }
+}
+
+fn build_first_stage_approval_payload(stage_id: &str, initial_prompt: &str) -> String {
+    serde_json::json!({
+        "stage_id": stage_id,
+        "initial_prompt": initial_prompt.trim(),
+    })
+    .to_string()
 }
 
 fn escape_markdown_label(label: &str) -> String {
@@ -220,6 +240,7 @@ pub async fn create_and_start_workspace(
         executor_config,
         prompt,
         attachment_ids,
+        pipeline_config,
     } = payload;
 
     let mut workspace_prompt = normalize_prompt(&prompt).ok_or_else(|| {
@@ -292,8 +313,150 @@ pub async fn create_and_start_workspace(
         }
     }
 
-    let workspace = managed_workspace.workspace.clone();
+    let mut workspace = managed_workspace.workspace.clone();
     tracing::info!("Created workspace {}", workspace.id);
+
+    // ── Pipeline initialisation (opt-in) ──────────────────────────
+    // Must happen BEFORE starting workspace so the first stage gets
+    // the correct stage prompt and verdict instruction.
+    if let Some(ref config_json) = pipeline_config {
+        // Validate that the JSON is a valid PipelineConfig with at least one stage.
+        let config: PipelineConfig = serde_json::from_str(config_json)
+            .map_err(|e| ApiError::BadRequest(format!("Invalid pipeline_config JSON: {e}")))?;
+
+        if config.stages.is_empty() {
+            return Err(ApiError::BadRequest(
+                "pipeline_config must contain at least one stage".to_string(),
+            ));
+        }
+
+        let first_stage = &config.stages[0];
+        let first_stage_id = first_stage.id.clone();
+
+        PipelineState::create(
+            &deployment.db().pool,
+            &CreatePipelineState {
+                workspace_id: workspace.id,
+                pipeline_config: config_json.clone(),
+                first_stage_id,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create pipeline state: {}", e);
+            ApiError::BadRequest(format!("Failed to initialise pipeline: {e}"))
+        })?;
+
+        tracing::info!(
+            "Pipeline initialised for workspace {} with {} stages",
+            workspace.id,
+            config.stages.len()
+        );
+    }
+
+    // If pipeline is configured, use the first stage's agent and handle approval.
+    if let Some(ref config_json) = pipeline_config {
+        let config: PipelineConfig = serde_json::from_str(config_json)
+            .map_err(|e| ApiError::BadRequest(format!("Invalid pipeline_config JSON: {e}")))?;
+        let first_stage = &config.stages[0];
+
+        // If first stage requires approval, set awaiting_approval and don't start execution.
+        if first_stage.approval == "approval" {
+            let _pipeline_state =
+                PipelineState::find_by_workspace_id(&deployment.db().pool, workspace.id)
+                    .await?
+                    .ok_or_else(|| ApiError::BadRequest("Pipeline state not found".to_string()))?;
+
+            let payload = build_first_stage_approval_payload(&first_stage.id, &workspace_prompt);
+            PipelineState::set_approval(
+                &deployment.db().pool,
+                workspace.id,
+                &first_stage.id,
+                &payload,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to set first stage approval: {}", e);
+                ApiError::BadRequest(format!("Failed to set first stage approval: {e}"))
+            })?;
+
+            // Create the container but don't start execution.
+            let container_ref = deployment.container().create(&workspace).await?;
+            workspace.container_ref = Some(container_ref.to_string());
+
+            deployment
+                .track_if_analytics_allowed(
+                    "workspace_created_and_started",
+                    serde_json::json!({
+                        "executor": &first_stage.agent,
+                        "workspace_id": workspace.id.to_string(),
+                    }),
+                )
+                .await;
+
+            // Return a response with no execution process — workspace is awaiting approval.
+            return Ok(ResponseJson(ApiResponse::success(
+                CreateAndStartWorkspaceResponse {
+                    workspace,
+                    execution_process: None,
+                },
+            )));
+        }
+
+        // First stage is auto-approved — start via pipeline executor with the stage's agent.
+        let pipeline_state =
+            PipelineState::find_by_workspace_id(&deployment.db().pool, workspace.id)
+                .await?
+                .ok_or_else(|| ApiError::BadRequest("Pipeline state not found".to_string()))?;
+
+        // Create container first.
+        let container_ref = deployment.container().create(&workspace).await?;
+        workspace.container_ref = Some(container_ref.to_string());
+        let initial_prompt_additions = build_initial_stage_prompt_additions(&workspace_prompt);
+
+        let started = pipeline_executor::start_pipeline_stage(
+            deployment.container(),
+            &deployment.db().pool,
+            &workspace,
+            &pipeline_state,
+            &first_stage.id,
+            &first_stage.role,
+            &first_stage.agent,
+            None,
+            &initial_prompt_additions,
+            false,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to start first pipeline stage: {}", e);
+            ApiError::BadRequest(format!("Failed to start first pipeline stage: {e}"))
+        })?;
+
+        deployment
+            .track_if_analytics_allowed(
+                "workspace_created_and_started",
+                serde_json::json!({
+                    "executor": &first_stage.agent,
+                    "workspace_id": workspace.id.to_string(),
+                }),
+            )
+            .await;
+
+        // Fetch the execution process to return.
+        let execution_process = db::models::execution_process::ExecutionProcess::find_by_id(
+            &deployment.db().pool,
+            started.execution_process_id,
+        )
+        .await?;
+
+        return Ok(ResponseJson(ApiResponse::success(
+            CreateAndStartWorkspaceResponse {
+                workspace,
+                execution_process,
+            },
+        )));
+    }
 
     let execution_process = deployment
         .container()
@@ -314,7 +477,7 @@ pub async fn create_and_start_workspace(
     Ok(ResponseJson(ApiResponse::success(
         CreateAndStartWorkspaceResponse {
             workspace,
-            execution_process,
+            execution_process: Some(execution_process),
         },
     )))
 }
@@ -325,7 +488,10 @@ mod tests {
     use db::models::file::File;
     use uuid::Uuid;
 
-    use super::{ImportedIssueAttachment, rewrite_imported_issue_attachments_markdown};
+    use super::{
+        ImportedIssueAttachment, build_first_stage_approval_payload,
+        build_initial_stage_prompt_additions, rewrite_imported_issue_attachments_markdown,
+    };
 
     fn imported_file(
         attachment_id: Uuid,
@@ -365,6 +531,21 @@ mod tests {
             rewritten,
             "[proposal.pdf](.vibe-attachments/abc_proposal.pdf)"
         );
+    }
+
+    #[test]
+    fn builds_initial_stage_prompt_additions_from_trimmed_prompt() {
+        let additions = build_initial_stage_prompt_additions("  implement workspace sync  ");
+        assert_eq!(additions, vec!["implement workspace sync".to_string()]);
+    }
+
+    #[test]
+    fn first_stage_approval_payload_includes_initial_prompt() {
+        let payload = build_first_stage_approval_payload("planner", "  plan the task  ");
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(value["stage_id"], "planner");
+        assert_eq!(value["initial_prompt"], "plan the task");
     }
 
     #[test]
