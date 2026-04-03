@@ -1,0 +1,667 @@
+# Multi-Agent Pipeline for Vibe Kanban
+
+## Overview
+
+Add a multi-agent pipeline feature to Vibe Kanban that chains multiple AI agent stages (Planner, Reviewer, Builder, Code Reviewer, Tester, Finisher) with configurable agents, approval policies, retry cycles, and escalation to a second agent.
+
+## Pipeline Stages (Default — 6 stages)
+
+```
+Planner ↔ Reviewer (up to 7 cycles, stops on first approved)
+         │
+         ▼ structured handoff
+Builder → Code Reviewer → Builder (fix, follow-up) → Tester → Finisher
+              ↑                                        |
+              └────────────────────────────────────────┘
+```
+
+1. **Planner** — creates a detailed implementation plan from the task description
+2. **Reviewer** — critically reviews the plan. Fail → back to Planner. Uses its own session, cycles via follow-up
+3. **Builder** — writes code following the approved plan. Also acts as Fixer via follow-up when Code Reviewer finds issues
+4. **Code Reviewer** — reviews written code via existing review route. Fail → Builder (follow-up fix)
+5. **Tester** — plans tests based on spec and architecture, writes and runs them. Fail → back to Code Reviewer
+6. **Finisher** — runs final test suite, verifies everything passes, pushes branch, creates PR with structured description. Fail → back to Tester
+
+Fixer is not a separate stage — it is Builder follow-up within the same session.
+
+## Transition Table
+
+| Current Stage | Verdict | Next Stage |
+|---|---|---|
+| Planner | approved | Reviewer |
+| Planner | failed | pause |
+| Reviewer | approved | Builder |
+| Reviewer | needs_changes | Planner |
+| Reviewer | retry exhausted | pause |
+| Builder | approved | Code Reviewer |
+| Builder | failed | pause |
+| Code Reviewer | approved | Tester |
+| Code Reviewer | needs_changes | Builder (follow-up fix) |
+| Code Reviewer | retry exhausted | escalate / pause |
+| Tester | approved | Finisher |
+| Tester | needs_changes | Code Reviewer |
+| Tester | retry exhausted | escalate / pause |
+| Finisher | approved | complete |
+| Finisher | needs_changes | Tester |
+| Finisher | retry exhausted | pause |
+
+## Pipeline Config Structure
+
+Pipeline is described as a JSON config stored as a pipeline profile.
+
+```json
+{
+  "name": "Full Pipeline",
+  "enable_second_agent": false,
+  "default_max_retries": 7,
+  "auto_create_pr": true,
+  "stages": [
+    {
+      "id": "planner",
+      "role": "planner",
+      "agent": "claude_code",
+      "approval": "auto",
+      "on_success": "reviewer",
+      "on_fail": "pause",
+      "max_retries": null,
+      "workflow_profile": "brainstorming",
+      "workflow_mode": "consensus",
+      "policies": ["structured_verdict", "structured_handoff"]
+    },
+    {
+      "id": "reviewer",
+      "role": "reviewer",
+      "agent": "claude_code",
+      "approval": "approval",
+      "on_success": "builder",
+      "on_fail": "planner",
+      "max_retries": 7,
+      "workflow_profile": "brainstorming",
+      "workflow_mode": "consensus",
+      "policies": ["structured_verdict", "structured_handoff"]
+    },
+    {
+      "id": "builder",
+      "role": "builder",
+      "agent": "claude_code",
+      "approval": "auto",
+      "on_success": "code_reviewer",
+      "on_fail": "pause",
+      "max_retries": null,
+      "workflow_profile": "executing-plans",
+      "workflow_mode": "batched",
+      "policies": ["structured_verdict", "structured_handoff"]
+    },
+    {
+      "id": "code_reviewer",
+      "role": "code_reviewer",
+      "agent": "claude_code",
+      "approval": "auto",
+      "on_success": "tester",
+      "on_fail": "builder",
+      "max_retries": 3,
+      "workflow_profile": "requesting-code-review",
+      "workflow_mode": "strict",
+      "policies": ["structured_verdict", "structured_handoff"]
+    },
+    {
+      "id": "tester",
+      "role": "tester",
+      "agent": "claude_code",
+      "approval": "auto",
+      "on_success": "finisher",
+      "on_fail": "code_reviewer",
+      "escalate_agent": "codex",
+      "escalate_after_retries": 3,
+      "max_retries": 3,
+      "workflow_profile": "verification-before-completion",
+      "workflow_mode": "strict",
+      "policies": ["structured_verdict", "structured_handoff", "require_tests", "no_done_without_verification"]
+    },
+    {
+      "id": "finisher",
+      "role": "finisher",
+      "agent": "claude_code",
+      "approval": "auto",
+      "on_success": "complete",
+      "on_fail": "tester",
+      "max_retries": 2,
+      "workflow_profile": "finishing-a-development-branch",
+      "workflow_mode": null,
+      "policies": ["structured_verdict", "no_done_without_verification"]
+    }
+  ]
+}
+```
+
+### Config Field Reference
+
+| Field | Description |
+|-------|-------------|
+| `name` | Pipeline profile display name |
+| `enable_second_agent` | Enable second AI agent for escalation when primary agent fails after retries |
+| `default_max_retries` | Default maximum retry count for all stages with correction cycles (default: 7). Cycle stops on first `approved` verdict — this is an upper bound, not a target |
+| `auto_create_pr` | Automatically create a Pull Request after successful pipeline completion (gated: single-repo + valid auth only, otherwise status = `ready_for_pr`) |
+| `id` | Unique stage identifier |
+| `role` | Stage role — determines the task the agent performs (planning, review, coding, testing) |
+| `agent` | Which AI agent executes this stage (claude_code, codex, gemini, etc.) |
+| `approval` | Whether user confirmation is required before this stage starts. `auto` — starts automatically, `approval` — waits for user OK |
+| `on_success` | Which stage to run after successful completion. `complete` = pipeline finished |
+| `on_fail` | What happens on failure. Can point to a previous stage for rework or `pause` for user decision |
+| `max_retries` | Max retry count for this specific stage's correction cycle. `null` = use `default_max_retries`. **Retry policy:** planning loop (Planner ↔ Reviewer) = 7 (broad exploration). Fix/test loops (Code Reviewer ↔ Builder, Tester ↔ Code Reviewer) = 3 (focused corrections) |
+| `escalate_agent` | Second agent that takes over when primary fails after retries. Receives full context: plan, code, and errors |
+| `escalate_after_retries` | How many failed attempts before escalating to the second agent |
+| `workflow_profile` | Which skill/workflow style to use for this stage. See Workflow Profiles section. Controller uses this to select the prompt pack |
+| `workflow_mode` | Local mode within the profile (e.g., `consensus` / `strict` for brainstorming, `batched` / `direct` for executing-plans) |
+| `policies` | Array of orthogonal rules that can be combined: `structured_verdict`, `structured_handoff`, `use_subagents`, `require_tests`, `require_root_cause`, `no_done_without_verification`, `auto_create_pr_if_possible` |
+
+## Workflow Profiles
+
+Behavioral layer on top of the pipeline engine. Maps superpowers skills to pipeline stages as configurable presets. Controller does not know skill internals — it only knows which prompt pack and policies to apply.
+
+**Core principle:** Pipeline engine is generic. Workflow profiles are the preferred execution style, not a hard dependency. Different agent types can have different profile sets.
+
+### Profile Registry
+
+Profiles are **internal versioned prompt-pack IDs** bundled with the pipeline engine. They are inspired by superpowers skills but do not depend on external skill files at runtime. If superpowers plugin is available, profiles can optionally load enhanced prompt content from it — but the pipeline works without it.
+
+| Profile | Inspired by | Best for |
+|---------|------------|----------|
+| `brainstorming` | superpowers:brainstorming | Planner, Reviewer (consensus mode) |
+| `writing-plans` | superpowers:writing-plans | Planner (detailed implementation plans) |
+| `executing-plans` | superpowers:executing-plans | Builder (task-by-task execution) |
+| `subagent-driven-development` | superpowers:subagent-driven-development | Builder (large tasks, parallel modules) |
+| `requesting-code-review` | superpowers:requesting-code-review | Code Reviewer |
+| `receiving-code-review` | superpowers:receiving-code-review | Builder fix loop (after review feedback) |
+| `systematic-debugging` | superpowers:systematic-debugging | Builder fix loop (root cause analysis) |
+| `verification-before-completion` | superpowers:verification-before-completion | Tester |
+| `finishing-a-development-branch` | superpowers:finishing-a-development-branch | Finisher |
+
+Each profile is a hardcoded prompt template in `pipeline_controller`. No external file dependency.
+
+### Default Stage Profiles
+
+| Stage | workflow_profile | workflow_mode | policies |
+|-------|-----------------|---------------|----------|
+| Planner | `brainstorming` | `consensus` | `structured_verdict`, `structured_handoff` |
+| Reviewer | `brainstorming` | `consensus` or `strict` | `structured_verdict`, `structured_handoff` |
+| Builder | `executing-plans` | `batched` | `structured_verdict`, `structured_handoff` |
+| Builder (fix) | `receiving-code-review` | — | `structured_verdict`, `structured_handoff`, `require_root_cause` |
+| Code Reviewer | `requesting-code-review` | `strict` | `structured_verdict`, `structured_handoff` |
+| Tester | `verification-before-completion` | `strict` | `structured_verdict`, `structured_handoff`, `require_tests`, `no_done_without_verification` |
+| Finisher | `finishing-a-development-branch` | — | `structured_verdict`, `no_done_without_verification` |
+
+### Policies Reference
+
+| Policy | Description |
+|--------|-------------|
+| `structured_verdict` | Agent must end response with JSON verdict block |
+| `structured_handoff` | Agent must produce structured handoff artifact for next stage |
+| `use_subagents` | Agent may spawn parallel subagents for independent subtasks |
+| `require_tests` | Agent must write and run tests before completing |
+| `require_root_cause` | Agent must identify root cause before fixing |
+| `no_done_without_verification` | Agent cannot report success without running verification |
+| `auto_create_pr_if_possible` | Attempt auto PR creation on pipeline completion |
+
+### How Controller Uses Profiles
+
+1. Controller reads `workflow_profile` from stage config
+2. Checks for **runtime profile overrides** (see below)
+3. Looks up the corresponding prompt template from internal registry
+4. Applies `workflow_mode` modifiers (consensus/strict, batched/direct)
+5. Appends `policies` as additional prompt instructions
+6. Injects the composed prompt via executor's `append_prompt`
+
+Controller never interprets skill logic — it just composes the prompt and enforces the verdict/handoff contract.
+
+### Runtime Profile Overrides
+
+Some transitions temporarily override the stage's default profile:
+
+| Transition | Override |
+|-----------|----------|
+| Code Reviewer → Builder (fix) | `workflow_profile` changes from `executing-plans` to `receiving-code-review`, adds `require_root_cause` policy |
+| Tester → Code Reviewer → Builder (fix) | Same override as above, plus test failure context in handoff |
+
+Override is applied by controller based on the **source of the transition** (which stage triggered the retry). The stage config itself is not modified — the override is ephemeral for that execution only.
+
+## Plan Reviewer Modes
+
+Plan Reviewer supports two modes. Code Reviewer always uses strict mode.
+
+### Consensus Mode (default)
+
+Reviewer can rewrite, improve, and extend the plan. Both agents converge through negotiation over multiple rounds. Best for complex, ambiguous, or large tasks.
+
+**Cycle:**
+1. Planner creates plan
+2. Reviewer returns improved/revised plan with structured changes
+3. Planner reconciles, produces new agreed version
+4. Repeat until reviewer returns `approved` or max retries reached
+
+**Reviewer returns:**
+```json
+{
+  "verdict": "needs_changes",
+  "revised_plan": "full improved plan text",
+  "what_changed": ["added error handling step", "removed redundant migration"],
+  "why_changed": ["original plan missed DB rollback scenario"],
+  "unresolved_issues": ["unclear how auth tokens are refreshed"]
+}
+```
+
+**Planner revision prompt receives:** current plan + reviewer's revised_plan + what_changed + why_changed + unresolved_issues. Planner produces a new reconciled version.
+
+### Strict Mode
+
+Reviewer only critiques — does not rewrite the plan. Returns blockers, missing steps, risks. Planner fixes issues independently. Best for small tasks, automated pipelines, or when minimal drift is needed.
+
+**Reviewer returns:**
+```json
+{
+  "verdict": "needs_changes",
+  "summary": "plan is mostly good but missing error handling",
+  "blockers": ["no rollback step for migration"],
+  "non_blockers": ["could improve variable naming"],
+  "missing_steps": ["add DB backup before migration"],
+  "risks": ["migration timeout on large tables"],
+  "suggested_fixes": ["add step 4a: create backup"]
+}
+```
+
+**Planner revision prompt receives:** current plan + reviewer's structured feedback. Planner addresses each blocker/missing step.
+
+### Mode Selection
+
+| Mode | Best for | Default |
+|------|----------|---------|
+| `consensus` | Complex tasks, manual supervision, ambiguous requirements | Yes (Plan Reviewer) |
+| `strict` | Small tasks, automated runs, minimal drift needed | No |
+
+Code Reviewer always operates in strict mode — no plan rewriting, only code critique with file:line references.
+
+## Architecture: PipelineController + Existing Execution Flow
+
+### Why a Separate PipelineController
+
+`spawn_exit_monitor()` is already 328 lines handling 13+ concerns (exit, commit, cleanup, queued follow-ups, finalization, remote sync, analytics). Pipeline transition logic must live in a separate module that exit_monitor calls.
+
+### PipelineController Module
+
+A thin, deterministic state machine. Not an "intelligent" service — just reads verdict, updates state, starts next stage.
+
+```
+spawn_exit_monitor() completes execution
+         │
+         ▼
+pipeline_controller.handle_stage_completed(ctx, execution_process_id)
+         │
+         ▼
+Parse verdict from CodingAgentTurn.summary
+         │
+         ▼
+┌─ verdict.approved ────────────────────┐
+│ Read on_success of current stage      │
+│ Build structured handoff artifact     │
+│ Start next stage                      │
+└───────────────────────────────────────┘
+         │
+┌─ verdict.needs_changes ───────────────────────┐
+│ retry_count < max_retries?                     │
+│  ├─ YES → on_fail stage, retry_count++        │
+│  │        pass feedback in handoff             │
+│  └─ NO → enable_second_agent?                 │
+│       ├─ YES → escalate_agent with full ctx   │
+│       └─ NO → status = paused, notify user    │
+└───────────────────────────────────────────────┘
+```
+
+### Idempotency & Locking Guarantees
+
+PipelineController must guarantee:
+- **One active stage per workspace** — check `pipeline_states.status == running` and `current_stage_id` before starting
+- **Safe transitions** — update `pipeline_states` in DB first, then start execution. If execution start fails, rollback `pipeline_states` to previous state. Note: true DB+process atomicity is not possible since child process spawn happens outside DB transactions
+- **Dedupe callbacks** — exit monitor passes `execution_process_id`; controller checks it matches current stage in `stage_history`. Already processed → skip
+
+## Verdict Contract
+
+Verdict is parsed from `CodingAgentTurn.summary`. Each role's prompt ends with:
+
+```
+End your response with a verdict block:
+\`\`\`json
+{"verdict": "approved|needs_changes|failed", "summary": "...", "issues": [...]}
+\`\`\`
+```
+
+### Verdict Parsing Strategy
+
+`CodingAgentTurn.summary` is currently truncated to 4096 characters. A long final response can cut off the verdict JSON block. To handle this:
+
+1. **v1**: Parse verdict from the **end** of summary — scan last 1024 characters for a JSON block matching the verdict schema. If not found, treat as `failed` → `paused`
+2. **Future**: Add a dedicated `stage_verdict` field to `CodingAgentTurn` (requires migration) for reliable storage independent of summary truncation
+
+Agents always exit with code 0. Both `approved` and `needs_changes` are successful exits. Exit code != 0 means crash/error, not a stage verdict.
+
+## Stage Approval Contract
+
+When a stage has `approval: "approval"`, PipelineController pauses **before starting** that stage.
+
+### Pre-stage Approval (before execution)
+
+Pipeline pauses and presents the handoff from the previous stage for user review:
+
+```json
+{
+  "awaiting_approval": true,
+  "approval_stage_id": "reviewer",
+  "approval_type": "pre_stage",
+  "approval_payload": {
+    "from_stage": "planner",
+    "handoff": {
+      "final_plan": "...",
+      "constraints": ["..."]
+    }
+  }
+}
+```
+
+User sees what will be passed to the next stage and decides: approve (proceed) or reject (go back).
+
+### Post-stage Result (after execution)
+
+Not an approval gate — this is the verdict from the completed stage, stored separately in `stage_history`:
+
+```json
+{
+  "stage_id": "reviewer",
+  "verdict": "approved",
+  "summary": "plan reviewed, no issues",
+  "handoff": { "..." }
+}
+```
+
+### API Endpoints
+
+- `POST /api/workspaces/:id/pipeline/approve` — continue pipeline to next stage
+- `POST /api/workspaces/:id/pipeline/reject` — return to previous stage with user feedback
+- `POST /api/workspaces/:id/pipeline/pause` — manually pause pipeline
+
+UI shows [Approve] [Reject] buttons when `awaiting_approval = true`.
+
+### Approval on Cyclic Stages
+
+When a stage with `approval: "approval"` is part of a retry cycle (e.g., Reviewer in Planner ↔ Reviewer loop):
+
+- **First entry** into the stage: approval required (user reviews handoff)
+- **Subsequent entries** (retry rounds): approval is **skipped** — loop runs automatically until verdict is `approved` or max_retries reached
+
+This prevents the planning loop from blocking on manual approval every round. If the user wants to intervene mid-loop, they can use the `POST /api/workspaces/:id/pipeline/pause` endpoint.
+
+## Pipeline State Storage
+
+### Two-level storage
+
+**1. `pipeline_states` table — runtime source of truth:**
+
+Tied to `workspace_id` (not session). One workspace = one pipeline instance.
+
+```sql
+CREATE TABLE pipeline_states (
+    id                  BLOB PRIMARY KEY,
+    workspace_id        BLOB NOT NULL UNIQUE,
+    pipeline_config     TEXT NOT NULL,       -- JSON snapshot of config
+    current_stage_id    TEXT NOT NULL,
+    status              TEXT NOT NULL,       -- running/paused/completed/failed/ready_for_pr
+    retry_counts        TEXT NOT NULL,       -- JSON
+    stage_history       TEXT NOT NULL,       -- JSON array of stage completions
+    handoff_artifacts   TEXT NOT NULL,       -- JSON structured handoffs
+    role_sessions       TEXT NOT NULL,       -- JSON map of role → session_id
+    awaiting_approval   INTEGER NOT NULL DEFAULT 0,
+    approval_stage_id   TEXT,
+    approval_payload    TEXT,               -- JSON
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL
+);
+```
+
+**2. `issue.extension_metadata` — best-effort UI mirror:**
+
+For kanban card display. Written best-effort — pipeline controller does not depend on success (workspace may not have issue_id).
+
+```json
+{
+  "pipeline": {
+    "current_stage": "builder",
+    "status": "running",
+    "attempt": "1/3",
+    "ready_for_pr": false
+  }
+}
+```
+
+### Role Session Map
+
+Each role gets its own session, reused across retry cycles via follow-up:
+
+```json
+{
+  "role_sessions": {
+    "planner": "session-uuid-1",
+    "reviewer": "session-uuid-2",
+    "builder": "session-uuid-3",
+    "code_reviewer": "session-uuid-4",
+    "tester": "session-uuid-5",
+    "finisher": "session-uuid-6"
+  }
+}
+```
+
+- Planner ↔ Reviewer cycle: each reuses its own session via follow-up
+- Builder fix: follow-up in builder's session (same session, Fixer is not separate)
+- New session created only on first invocation of a role
+
+### Pipeline State Fields
+
+| Field | Description |
+|-------|-------------|
+| `pipeline_config` | Snapshot of the pipeline config at task creation time |
+| `current_stage_id` | Currently active stage |
+| `status` | `running` / `paused` / `completed` / `failed` / `ready_for_pr` |
+| `retry_counts` | Retry counters for each correction cycle |
+| `stage_history` | Log of all completed stages with execution_process_id links |
+| `handoff_artifacts` | Structured handoff data between stages |
+| `role_sessions` | Map of role → session_id for session reuse |
+| `awaiting_approval` | Whether pipeline is waiting for user approval |
+| `approval_stage_id` | Which stage is awaiting approval |
+| `approval_payload` | Verdict/handoff data for the pending approval |
+
+## Context Passing Between Stages
+
+### Session Reuse (Same agent, same role cycle)
+
+Uses follow-up within the role's session. Planner follow-up gets Reviewer's feedback in prompt. Builder follow-up gets Code Reviewer's issues.
+
+### Resume (Same agent family, cross-role)
+
+If Builder and Code Reviewer are both Claude Code, Code Reviewer can resume builder's session via `--resume {session_id}` through the existing review route.
+
+### Mixed Executor Rule
+
+If Code Reviewer is a **different agent family** than Builder (e.g., Claude → Codex), review runs in a **separate session without resume**, receiving only handoff + git diff.
+
+### Prompt Injection (Cross-agent handoff)
+
+When agents differ, structured handoff artifact is injected into the prompt. Full context passed without truncation (models support 1M context).
+
+### Structured Handoff Artifact
+
+Not raw conversation history, not a single summary string. A structured package:
+
+**Planner → Builder:**
+```json
+{
+  "final_plan": "full agreed plan in markdown",
+  "review_summary": "brief review outcome: what was contested, what was resolved",
+  "constraints": ["don't break API", "keep backward compat"],
+  "risks": ["migration may be slow"],
+  "acceptance_criteria": ["endpoint returns 200", "tests pass"]
+}
+```
+
+**Builder → Code Reviewer:**
+- git diff from pipeline start
+- final_plan from handoff
+- acceptance_criteria
+
+**Code Reviewer → Builder (fix):**
+- list of issues with file:line references
+- delivered via follow-up in builder's session
+
+**Tester → Code Reviewer (on failure):**
+- test report (pass/fail per test)
+- final_plan + diff + acceptance_criteria
+
+### Automatic Method Selection
+
+The system chooses the context passing method automatically based on agent types in pipeline config. Not exposed in UI.
+
+## Prompt Templates
+
+Hardcoded in the codebase, not visible to users. Each role gets a system prompt via executor's `append_prompt`.
+
+Subagent instructions baked into prompts for Builder, Code Reviewer, Tester. Not a separate UI setting.
+
+All prompts in English. Each prompt ends with verdict output instruction.
+
+## Code Review Stage
+
+Code Review stage uses the **existing review route** (`POST /api/sessions/:id/review`) and `ReviewRequest` structure. This route already supports:
+- `executor_config` for agent selection
+- `context` with repo review context (repo_id, base_commit)
+- `session_id` for resume (same agent family only)
+
+For mixed executors (e.g., Claude builder → Codex reviewer), review runs in a new session with handoff + diff only.
+
+## UI Design
+
+### Task Creation (Pipeline Settings)
+
+Pipeline settings appear in the task creation form, next to agent selection:
+
+```
+☐ Pipeline                                      (?)
+┌────────────────────────────────────────────────┐
+│  Template: [Full Pipeline ▾]                   │
+│                                                │
+│  Planner      [Claude Code ▾]  [Auto    ▾]      (?) │
+│  Reviewer     [Claude Code ▾]  [Approval▾] [Consensus ▾] (?) │
+│  Builder      [Claude Code ▾]  [Auto    ▾]      (?) │
+│  Code Review  [Claude Code ▾]  [Auto    ▾]      (?) │
+│  Tester       [Claude Code ▾]  [Auto    ▾]      (?) │
+│  Finisher     [Claude Code ▾]  [Auto    ▾]      (?) │
+│                                                │
+│  ☐ Second agent: [Codex ▾] after [3] attempts │
+│  ☑ Create PR after completion               (?)│
+└────────────────────────────────────────────────┘
+```
+
+Pipeline checkbox disabled = single agent mode (current behavior).
+
+### Tooltip Reference (Russian)
+
+| Element | Tooltip |
+|---------|---------|
+| Pipeline (?) | Включить многоэтапный pipeline. Задача проходит через несколько AI-агентов: планирование, ревью, написание кода, проверка и тестирование |
+| Planner (?) | Создаёт детальный план реализации на основе описания задачи |
+| Reviewer (?) | Проверяет план на качество и полноту. Если найдены проблемы — возвращает на доработку |
+| Builder (?) | Пишет код по одобренному плану. Также исправляет баги найденные на ревью кода |
+| Code Review (?) | Проверяет написанный код на ошибки, баги и соответствие плану |
+| Tester (?) | Планирует тесты на основе ТЗ и архитектуры, пишет и запускает их |
+| Finisher (?) | Проверяет прохождение всех тестов, подготавливает ветку к мержу, создаёт Pull Request со структурированным описанием |
+| Consensus/Strict (?) | Режим ревью плана. Consensus — ревьювер может переписывать и улучшать план, агенты договариваются через несколько раундов. Strict — ревьювер только критикует, не переписывает план |
+| Agent dropdown (?) | Какой AI-агент выполняет этот этап |
+| Approval dropdown (?) | Auto — этап запускается автоматически. Одобрение — ждёт вашего подтверждения перед началом |
+| Second agent (?) | Когда основной агент не может исправить ошибки после нескольких попыток, задача передаётся второму агенту с полным контекстом: план, код и описание ошибок |
+| After attempts (?) | После скольких неудачных попыток основного агента подключить второго |
+| Create PR (?) | После успешного прохождения всех этапов pipeline автоматически создаст Pull Request и карточка перейдёт в колонку "In Review". Работает только для single-repo workspace с настроенной git авторизацией |
+
+### Kanban Card Progress
+
+Compact progress indicator on the workspace card (via workspace_summary):
+
+```
+┌──────────────────────────────────┐
+│ Task Title                       │
+│                                  │
+│ ● ● ● ○ ○ ○   Builder (3/6)       │
+│ Attempt 1/3 · Claude Code    🔄 │
+└──────────────────────────────────┘
+```
+
+States:
+- 🔄 Running
+- ⏸ Paused (waiting for approval or retry limit reached)
+- "Escalation · Codex" when second agent is active
+
+Details (stage history, logs, errors) visible on card click.
+
+### Kanban Column Transitions
+
+All internal pipeline stages stay in **In Progress**. `ready_for_pr` is a pipeline status inside `pipeline_states`, NOT a kanban column.
+
+Uses existing Vibe Kanban auto-move mechanisms:
+- **Todo → In Progress**: workspace creation (already exists)
+- Pipeline completes → `pipeline_states.status = ready_for_pr` (card stays in **In Progress**)
+- If `auto_create_pr` enabled + single-repo + valid auth → PR created automatically → card moves to **In Review**
+- If conditions not met → card stays in **In Progress** with `pipeline_states.status = ready_for_pr`, user creates PR manually
+- **In Review → Done**: PR merge (already exists)
+
+## Notifications
+
+Pipeline events that require user attention use the existing notification system (`notification.rs`, `executor_approvals.rs`).
+
+| Event | Notification | Action |
+|-------|-------------|--------|
+| `awaiting_approval` | Push notification + dashboard badge | Click → opens workspace with approval buttons |
+| `paused` (max retries reached) | Push notification: "Pipeline paused: {stage} failed after {N} attempts" | Click → opens workspace with stage logs |
+| `ready_for_pr` | Push notification: "Pipeline complete, ready for PR" | Click → opens workspace with PR creation |
+| `escalation_started` | Push notification: "Escalated to {agent}: {reason}" | Click → opens workspace |
+| `pipeline_completed` | Push notification: "Pipeline finished successfully" | Click → opens workspace |
+
+No new notification infrastructure needed — reuse existing `NotificationService` and approval notification patterns.
+
+## Key Files to Modify
+
+### Backend (Rust)
+
+| File | Change |
+|------|--------|
+| `crates/services/src/services/pipeline_controller.rs` | **New file.** Thin state machine: read verdict, update state, start next stage |
+| `crates/executors/src/actions/mod.rs` | Add `PipelineConfig` struct, `StageConfig`, `Verdict`, `HandoffArtifact` types |
+| `crates/local-deployment/src/container.rs` | Call `pipeline_controller.handle_stage_completed()` from `spawn_exit_monitor()` |
+| `crates/server/src/routes/sessions/mod.rs` | Accept pipeline config in attempt creation |
+| `crates/server/src/routes/workspaces/` | Add pipeline approve/reject/pause endpoints |
+| `crates/db/src/models/pipeline_state.rs` | **New file.** PipelineState model |
+| `crates/db/migrations/` | **New migration.** Create `pipeline_states` table |
+| `crates/server/src/routes/workspaces/workspace_summary.rs` | Add pipeline progress data to workspace summary |
+
+### Frontend (TypeScript/React)
+
+| File | Change |
+|------|--------|
+| `packages/web-core/src/features/kanban/ui/` | Pipeline progress indicator on workspace cards |
+| `packages/web-core/src/shared/dialogs/` | Pipeline settings panel in task creation form |
+| `packages/web-core/src/shared/components/` | Approval buttons for pipeline stage approval |
+| `shared/types.ts` | Pipeline config and state TypeScript types (generated from Rust) |
+
+## Modes
+
+### Single Agent (Pipeline off)
+Current behavior — one agent, one execution. No changes needed.
+
+### Pipeline (Single agent type)
+All stages use the same agent (e.g., Claude Code). Context passed via session follow-up and resume. Most efficient mode.
+
+### Pipeline (Two agents with escalation)
+Primary agent runs all stages. If Tester fails after `escalate_after_retries`, full context (all handoff artifacts + git diff + test report) is passed to second agent (e.g., Codex) via prompt injection. Second agent reviews and fixes the entire implementation.

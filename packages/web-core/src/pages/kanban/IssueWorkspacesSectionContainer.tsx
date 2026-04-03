@@ -105,6 +105,12 @@ export function IssueWorkspacesSectionContainer({
         hasUnseenActivity: localWorkspace?.hasUnseenActivity,
         latestProcessCompletedAt: localWorkspace?.latestProcessCompletedAt,
         latestProcessStatus: localWorkspace?.latestProcessStatus,
+        pipelineStage: localWorkspace?.pipelineStage,
+        pipelineStatus: localWorkspace?.pipelineStatus,
+        pipelineStageIndex: localWorkspace?.pipelineStageIndex,
+        pipelineTotalStages: localWorkspace?.pipelineTotalStages,
+        pipelineAttempt: localWorkspace?.pipelineAttempt,
+        pipelineAwaitingApproval: localWorkspace?.pipelineAwaitingApproval,
       };
     });
   }, [

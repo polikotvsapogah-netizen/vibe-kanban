@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pipeline_states SET\n                status = $1,\n                updated_at = datetime('now', 'subsec')\n               WHERE workspace_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "859ca7b3dbf8d8d2304cadc72f76f11c401e7eecdfdc8a9c7567d763cfe28546"
+}

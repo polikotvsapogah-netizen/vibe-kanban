@@ -14,6 +14,12 @@ pub mod filesystem_watcher;
 pub mod migration;
 pub mod notification;
 pub mod oauth_credentials;
+pub mod pipeline_controller;
+pub mod pipeline_executor;
+pub mod pipeline_handoff;
+pub mod pipeline_pr;
+pub mod pipeline_prompts;
+pub mod pipeline_types;
 pub mod pr_monitor;
 
 #[cfg(feature = "qa-mode")]
@@ -22,3 +28,4 @@ pub mod queued_message;
 pub mod remote_client;
 pub mod remote_sync;
 pub mod repo;
+pub mod verdict_parser;

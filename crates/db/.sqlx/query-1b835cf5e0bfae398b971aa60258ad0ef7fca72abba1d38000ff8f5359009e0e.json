@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pipeline_states WHERE workspace_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "1b835cf5e0bfae398b971aa60258ad0ef7fca72abba1d38000ff8f5359009e0e"
+}

@@ -8,6 +8,7 @@ pub mod gh_cli_setup;
 pub mod git;
 pub mod integration;
 pub mod links;
+pub mod pipeline;
 pub mod pr;
 pub mod repos;
 pub mod streams;
@@ -35,6 +36,7 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .nest("/execution", execution::router())
         .nest("/integration", integration::router())
         .nest("/repos", repos::router())
+        .nest("/pipeline", pipeline::router())
         .nest("/pull-requests", pr::router())
         .layer(from_fn_with_state(
             deployment.clone(),

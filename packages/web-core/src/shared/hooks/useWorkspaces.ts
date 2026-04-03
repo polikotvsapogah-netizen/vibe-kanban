@@ -33,6 +33,12 @@ export interface SidebarWorkspace {
   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
   prNumber?: number;
   prUrl?: string;
+  pipelineStage?: string;
+  pipelineStatus?: string;
+  pipelineStageIndex?: number;
+  pipelineTotalStages?: number;
+  pipelineAttempt?: string;
+  pipelineAwaitingApproval?: boolean;
 }
 
 // Keep the old export name for backwards compatibility
@@ -81,6 +87,12 @@ function toSidebarWorkspace(
     prNumber:
       summary?.pr_number != null ? Number(summary.pr_number) : undefined,
     prUrl: summary?.pr_url ?? undefined,
+    pipelineStage: summary?.pipeline_stage ?? undefined,
+    pipelineStatus: summary?.pipeline_status ?? undefined,
+    pipelineStageIndex: summary?.pipeline_stage_index ?? undefined,
+    pipelineTotalStages: summary?.pipeline_total_stages ?? undefined,
+    pipelineAttempt: summary?.pipeline_attempt ?? undefined,
+    pipelineAwaitingApproval: summary?.pipeline_awaiting_approval ?? undefined,
   };
 }
 

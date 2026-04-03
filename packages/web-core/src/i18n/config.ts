@@ -9,6 +9,7 @@ import enSettings from './locales/en/settings.json';
 import enProjects from './locales/en/projects.json';
 import enTasks from './locales/en/tasks.json';
 import enOrganization from './locales/en/organization.json';
+import enPipeline from './locales/en/pipeline.json';
 import frCommon from './locales/fr/common.json';
 import frSettings from './locales/fr/settings.json';
 import frProjects from './locales/fr/projects.json';
@@ -39,6 +40,7 @@ import zhHantSettings from './locales/zh-Hant/settings.json';
 import zhHantProjects from './locales/zh-Hant/projects.json';
 import zhHantTasks from './locales/zh-Hant/tasks.json';
 import zhHantOrganization from './locales/zh-Hant/organization.json';
+import ruPipeline from './locales/ru/pipeline.json';
 
 const resources = {
   en: {
@@ -47,6 +49,7 @@ const resources = {
     projects: enProjects,
     tasks: enTasks,
     organization: enOrganization,
+    pipeline: enPipeline,
   },
   fr: {
     common: frCommon,
@@ -89,6 +92,9 @@ const resources = {
     projects: zhHantProjects,
     tasks: zhHantTasks,
     organization: zhHantOrganization,
+  },
+  ru: {
+    pipeline: ruPipeline,
   },
 };
 
